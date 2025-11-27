@@ -1,0 +1,17 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "live-translation-server",
+  "license": "ISC",
+  "author": "chiyan",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ioredis": "^5.8.2",
+    "ws": "^8.18.3"
+  }
+}

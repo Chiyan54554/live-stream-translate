@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播實時翻譯系統 - Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
+        #container { max-width: 1200px; margin: auto; display: flex; gap: 20px; }
+        #live-video-section { flex: 2; }
+        #translation-section { flex: 1; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; }
+        #status { padding: 10px; margin-bottom: 15px; border-radius: 4px; font-weight: bold; }
+        .status-ready { background-color: #d4edda; color: #155724; }
+        .status-error { background-color: #f8d7da; color: #721c24; }
+        
+        #results { list-style: none; padding: 0; }
+        .translation-item { margin-bottom: 15px; padding: 10px; border-left: 5px solid #007bff; background-color: #f9f9f9; border-radius: 4px; opacity: 0; animation: fadeIn 0.5s forwards; }
+        .transcription { color: #555; font-style: italic; font-size: 0.9em; margin-bottom: 5px; }
+        .translation { font-weight: bold; color: #000; font-size: 1.1em; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <h1>直播實時翻譯系統</h1>
+
+    <div id="container">
+        <section id="live-video-section">
+            <h2>直播內容 (YouTube/Twitch)</h2>
+            <iframe 
+                width="100%" 
+                height="400" 
+                src="https://www.twitch.tv/videos/2626749881" 
+                frameborder="0" 
+                allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" 
+                allowfullscreen>
+            </iframe>
+            <p><strong>注意：</strong> 音訊處理在伺服器端進行，請確保您的 Node.js 伺服器正在使用 FFmpeg 抓取此直播源。</p>
+        </section>
+
+        <section id="translation-section">
+            <h2>實時翻譯結果</h2>
+            <div id="status" class="status-error">連線狀態: 正在嘗試連接伺服器...</div>
+            <ul id="results">
+                <li>等待第一個翻譯片段...</li>
+            </ul>
+        </section>
+    </div>
+
+    <script>
+        const WSS_URL = 'ws://localhost:8080'; // 必须匹配 server.js 的端口
+        const resultsList = document.getElementById('results');
+        const statusDiv = document.getElementById('status');
+        let socket;
+
+        function updateStatus(message, isError = false) {
+            statusDiv.textContent = '連線狀態: ' + message;
+            statusDiv.className = isError ? 'status-error' : 'status-ready';
+        }
+
+        function connectWebSocket() {
+            if (socket) {
+                socket.close();
+            }
+            updateStatus('正在連接...', false);
+
+            socket = new WebSocket(WSS_URL);
+
+            socket.onopen = function() {
+                updateStatus('連接成功！等待伺服器傳輸翻譯結果...', false);
+                // 移除初始化提示
+                if (resultsList.children[0] && resultsList.children[0].textContent.includes('等待')) {
+                    resultsList.innerHTML = '';
+                }
+            };
+
+            socket.onmessage = function(event) {
+                try {
+                    // 接收并解析 Python 传回的 JSON 字符串
+                    const data = JSON.parse(event.data); 
+                    
+                    if (data.status === 'error') {
+                         updateStatus(`伺服器錯誤: ${data.message}`, true);
+                         return;
+                    }
+
+                    // 渲染翻译结果
+                    const listItem = document.createElement('li');
+                    listItem.className = 'translation-item';
+                    
+                    // 原始轉錄
+                    const transDiv = document.createElement('div');
+                    transDiv.className = 'transcription';
+                    transDiv.textContent = `(${data.timestamp}) [${data.source_lang}]: ${data.transcription || '（轉錄中...）'}`;
+                    
+                    // 翻譯結果
+                    const trDiv = document.createElement('div');
+                    trDiv.className = 'translation';
+                    trDiv.textContent = `[${data.target_lang}]: ${data.translation || '（翻譯中...）'}`;
+                    
+                    listItem.appendChild(transDiv);
+                    listItem.appendChild(trDiv);
+                    
+                    // 将最新结果添加到列表顶部
+                    resultsList.prepend(listItem);
+                    
+                } catch (error) {
+                    console.error("無法解析接收到的數據:", event.data);
+                    updateStatus('接收到無效數據，請檢查 Python 輸出格式。', true);
+                }
+            };
+
+            socket.onclose = function(event) {
+                updateStatus('連接已斷開，嘗試在 5 秒後重連...', true);
+                // 自动重连机制
+                setTimeout(connectWebSocket, 5000); 
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket 錯誤:', error);
+                updateStatus('WebSocket 發生錯誤！', true);
+            };
+        }
+
+        // 页面加载完成后立即尝试连接
+        window.onload = connectWebSocket;
+    </script>
+</body>
+</html>

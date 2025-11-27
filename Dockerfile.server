@@ -1,0 +1,28 @@
+# Dockerfile.server
+FROM node:18-slim
+
+# 安裝 FFmpeg, yt-dlp, 和 Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    && pip install yt-dlp \
+    && rm -rf /var/lib/apt/lists/*
+
+# 設置 Node.js 服務器
+WORKDIR /app/server
+# 複製 package.json，運行 npm install
+COPY server/package.json .
+RUN npm install
+
+# 複製應用程式碼和 client.html
+COPY server/server.js .
+COPY client.html ../client.html
+
+WORKDIR /app
+
+# 暴露 WebSocket Port
+EXPOSE 8080
+
+# 啟動 Node.js 程式
+CMD ["node", "server/server.js"]

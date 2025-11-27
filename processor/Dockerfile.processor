@@ -1,0 +1,13 @@
+# processor/Dockerfile.processor
+FROM python:3.9-slim
+
+# 安裝 Python 依賴
+WORKDIR /app/processor
+COPY processor/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 複製應用程式碼
+COPY processor/processor.py .
+
+# 啟動 Python 程式
+CMD ["python", "processor.py"]
