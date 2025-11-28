@@ -5,7 +5,7 @@
 FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
 
 # 設置工作目錄
-WORKDIR /app/processor
+WORKDIR /app
 
 # 2. 安裝其他系統依賴 (例如 ffmpeg, librosa 相關)
 # 注意：許多 PyTorch 映像可能已經包含大部分科學計算依賴，
