@@ -52,6 +52,9 @@
 
     <script>
         const WSS_URL = 'ws://localhost:8080'; // 必须匹配 server.js 的端口
+        /** ⭐ 新增：設定列表最大顯示數量 ⭐ */
+        const MAX_RESULTS = 4; 
+        
         const resultsList = document.getElementById('results');
         const statusDiv = document.getElementById('status');
         let socket;
@@ -79,7 +82,7 @@
 
             socket.onmessage = function(event) {
                 try {
-                    // 接收并解析 Python 传回的 JSON 字符串
+                    // 接收並解析 Python 傳回的 JSON 字符串
                     const data = JSON.parse(event.data); 
                     
                     if (data.status === 'error') {
@@ -87,7 +90,7 @@
                          return;
                     }
 
-                    // 渲染翻译结果
+                    // 渲染翻譯結果
                     const listItem = document.createElement('li');
                     listItem.className = 'translation-item';
                     
@@ -104,8 +107,14 @@
                     listItem.appendChild(transDiv);
                     listItem.appendChild(trDiv);
                     
-                    // 将最新结果添加到列表顶部
+                    // 將最新結果添加到列表頂部
                     resultsList.prepend(listItem);
+                    
+                    /** ⭐ 新增：檢查列表長度並移除最舊的項目 ⭐ */
+                    while (resultsList.children.length > MAX_RESULTS) {
+                        // 移除列表中的最後一個子元素 (最舊的項目)
+                        resultsList.removeChild(resultsList.lastChild);
+                    }
                     
                 } catch (error) {
                     console.error("無法解析接收到的數據:", event.data);
@@ -115,7 +124,7 @@
 
             socket.onclose = function(event) {
                 updateStatus('連接已斷開，嘗試在 5 秒後重連...', true);
-                // 自动重连机制
+                // 自動重連機制
                 setTimeout(connectWebSocket, 5000); 
             };
 
@@ -125,7 +134,7 @@
             };
         }
 
-        // 页面加载完成后立即尝试连接
+        // 頁面載入完成後立即嘗試連接
         window.onload = connectWebSocket;
     </script>
 </body>

@@ -122,6 +122,13 @@ def google_mt(text: str) -> str:
 def process_audio_chunk(audio_data_b64, r):
     # 執行實際的 Whisper ASR
     transcribed_text = whisper_asr(audio_data_b64)
+
+    # =======================================================
+    # 【關鍵修改：檢查轉錄文本】
+    # 如果轉錄文本為空字串，則直接返回，不進行翻譯和發佈
+    if not transcribed_text:
+        return
+    # =======================================================
     
     # 執行實際翻譯
     translated_text = google_mt(transcribed_text)

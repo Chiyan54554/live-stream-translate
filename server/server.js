@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/nacho_dayo'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/tororo_vtuber'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -164,24 +164,40 @@ function getStreamUrl(callback) {
     console.log(`--- 正在使用 yt-dlp 解析直播串流 URL: ${LIVE_PAGE_URL} ---`);
     const YTDLP_EXEC_PATH = 'yt-dlp'; 
     const ytdlp = spawn(YTDLP_EXEC_PATH, ['-f', 'bestaudio', '--get-url', LIVE_PAGE_URL]);
+    
     let streamUrl = '';
-
+    let ytdlpError = ''; // 🌟 新增：捕獲 yt-dlp 錯誤輸出
+    
     ytdlp.stdout.on('data', (data) => {
         streamUrl += data.toString().trim();
     });
     
     ytdlp.stderr.on('data', (data) => {
-        console.error(`[yt-dlp 调试/警告]: ${data.toString().trim()}`);
+        // 🌟 捕獲所有 stderr 數據
+        ytdlpError += data.toString();
+        // console.error(`[yt-dlp 调试/警告]: ${data.toString().trim()}`); // 可以取消註釋這行查看進度
     });
 
     ytdlp.on('close', (code) => {
         if (code === 0 && streamUrl) {
-            console.log('✅ yt-dlp 解析成功，獲取到串流 URL。');
-            callback(streamUrl.split('\n')[0]);
+            console.log('--- yt-dlp 解析成功。');
+            callback(streamUrl);
         } else {
-            console.error('❌ yt-dlp 解析失敗，無法獲取串流 URL。');
-            callback(null);
+            // 🌟 如果退出碼不是 0 或沒有返回 URL，輸出詳細錯誤
+            console.error(`致命錯誤：yt-dlp 进程退出, Code: ${code}.`);
+            if (ytdlpError.trim()) {
+                console.error(`yt-dlp 錯誤輸出 (stderr):\n${ytdlpError.trim()}`);
+            } else {
+                console.error('yt-dlp 沒有返回詳細錯誤訊息。可能原因：連結無效或非直播，或 Docker 網路問題。');
+            }
+            // 10 秒後重試
+            setTimeout(() => getStreamUrl(callback), 10000); 
         }
+    });
+
+    ytdlp.on('error', (err) => {
+        console.error('致命錯誤：yt-dlp 啟動失敗:', err);
+        setTimeout(() => getStreamUrl(callback), 10000); 
     });
 }
 
