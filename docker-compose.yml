@@ -18,19 +18,11 @@ services:
   processor:
     build:
       context: .
-      # 🌟 修正路徑: 假設 Dockerfile.processor 在根目錄
       dockerfile: processor/Dockerfile.processor
-      # 🌟 選擇一個更大的模型，以便在 GPU 上獲得更好的性能
     container_name: python_processor
     
-    # 啟用 GPU 加速的配置 (如我們之前所討論)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all # 使用所有可用的 GPU
-              capabilities: [gpu]
+    # 配置 GPU 支持
+    gpus: all 
 
     depends_on:
       redis:
@@ -39,7 +31,7 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: medium # 建議使用 'medium' 模型以獲得更好的準確度
+      ASR_MODEL_NAME: medium
       
   # 3. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
   server:

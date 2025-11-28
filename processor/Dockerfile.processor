@@ -2,7 +2,7 @@
 
 # 1. 基礎映像：使用 NVIDIA 官方的 CUDA/PyTorch 映像
 # 選擇一個適合您主機 CUDA 版本的映像。這裡以最新的穩定版為例：
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
 # 設置工作目錄
 WORKDIR /app
