@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/videos/2626749881'; 
+const LIVE_PAGE_URL = 'https://www.twitch.tv/iitifox'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -91,45 +91,71 @@ function initializeRedisClients() {
     });
 }
 
-// 2. 啟動 FFmpeg 處理器，並將輸出 **發佈到 Redis**
-function startFFmpegProcessor(streamUrl) {
-    console.log('--- 啟動 FFmpeg 進程抓取直播流 ---');
+// 2. 啟動串流處理 (yt-dlp -> Pipe -> FFmpeg -> Redis)
+function startStreamProcessing(publisher) {
+    console.log(`--- 正在使用 yt-dlp 啟動串流處理: ${LIVE_PAGE_URL} ---`);
+    const YTDLP_EXEC_PATH = 'yt-dlp';
+    const FFMPEG_EXEC_PATH = 'ffmpeg';
     
-    // FFmpeg 參數 (保持 16kHz PCM 輸出)
+    // 1. 啟動 yt-dlp，要求它將音頻流輸出到 stdout ('-o', '-')
+    // 我們同時要求 yt-dlp 輸出日誌到 stderr，方便除錯。
+    const ytdlpProcess = spawn(YTDLP_EXEC_PATH, [
+        '-f', 'bestaudio', 
+        '--no-warnings',
+        '--force-ipv4',
+        '--referer', 'https://www.twitch.tv/',  // 模擬從網頁發起連線
+        '--no-check-certificate',               // 忽略 SSL/TLS 證書檢查 (有時能解決握手問題)
+        '-o', '-', 
+        LIVE_PAGE_URL
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    // 2. 啟動 FFmpeg，從 stdin 讀取音頻 ('-i', 'pipe:0')
     const ffmpegArgs = [
-        '-re', 
-        '-nostdin', 
-        '-analyzeduration', '10000000', 
-        '-probesize', '10000000',
-        '-loglevel', 'error', 
-        '-i', streamUrl,
-        '-ac', '1', 
-        '-ar', '16000', 
-        '-acodec', 'pcm_s16le', 
-        '-f', 's16le', 
-        'pipe:1'
+        '-i', 'pipe:0',          // 讓 FFmpeg 從其 stdin 讀取數據 (即 yt-dlp 的輸出)
+        '-acodec', 'pcm_s16le',
+        '-ar', '16000',
+        '-ac', '1',
+        '-f', 's16le',
+        'pipe:1'                 // 輸出到 stdout
     ];
 
-    ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-        stdio: ['ignore', 'pipe', process.stderr]
+    const ffmpegProcess = spawn(FFMPEG_EXEC_PATH, ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
     });
     
-    console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
+    // 3. 核心：將 yt-dlp 的 stdout 管道連接到 FFmpeg 的 stdin
+    ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
 
-    // 關鍵：將 FFmpeg 的 stdout 數據塊發佈到 Redis 
+    console.log('✅ yt-dlp 輸出已成功導向 FFmpeg 進行處理 (Piping)。');
+    console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
+    
+    // 4. 處理 FFmpeg 的輸出 (音頻數據)
     ffmpegProcess.stdout.on('data', (audioChunk) => {
-        // 將 Buffer 轉換為 Base64 字符串發佈，以便 Python 接收
         const base64Audio = audioChunk.toString('base64');
-        
-        // 發佈音頻數據到 Redis
         publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
             console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
         });
     });
 
-    ffmpegProcess.on('error', (err) => console.error('FFmpeg 啟動失敗:', err));
+    // 5. 錯誤和關閉處理
+    // 輸出 yt-dlp 的錯誤和警告
+    ytdlpProcess.stderr.on('data', (data) => {
+        // 大部分是警告，但仍需注意
+        // console.error(`[yt-dlp 警告/錯誤]: ${data.toString().trim()}`); 
+    });
+    ytdlpProcess.on('error', (err) => console.error('致命錯誤：yt-dlp 啟動失敗:', err));
+    ytdlpProcess.on('close', (code) => {
+        if (code !== 0) console.error(`yt-dlp 进程退出, Code: ${code}. 直播流可能中斷。`);
+    });
+    
+    // 輸出 FFmpeg 的錯誤和警告 (通常是進度信息，可以註釋掉以減少日誌)
+    ffmpegProcess.stderr.on('data', (data) => {
+         // console.error(`[FFmpeg 警告/錯誤]: ${data.toString().trim()}`);
+    });
+    ffmpegProcess.on('error', (err) => console.error('致命錯誤：FFmpeg 啟動失敗:', err));
     ffmpegProcess.on('close', (code) => {
-        console.log(`FFmpeg 进程退出, Code: ${code}.`);
+        console.log(`FFmpeg 进程退出, Code: ${code}. 正在嘗試重連...`);
+        // 注意：這裡可以加入重連邏輯，但目前先以啟動成功為目標。
     });
 }
 
@@ -161,8 +187,6 @@ function getStreamUrl(callback) {
 
 function startMainFlow() {
     initializeRedisClients();
-    getStreamUrl((streamUrl) => {
-        if (!streamUrl) return;
-        startFFmpegProcessor(streamUrl); 
-    });
+    // 直接啟動管道處理，不再需要獲取臨時 URL
+    startStreamProcessing(publisher); 
 }
