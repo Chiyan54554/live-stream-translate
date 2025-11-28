@@ -6,7 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     python3 \
     python3-pip \
-    && pip install yt-dlp \
+    # 🌟 解決 PEP 668 錯誤：加入 --break-system-packages 旗標
+    && pip install yt-dlp --break-system-packages \
     && rm -rf /var/lib/apt/lists/*
 
 # 設置 Node.js 服務器
