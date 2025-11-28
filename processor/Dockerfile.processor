@@ -1,13 +1,27 @@
-# processor/Dockerfile.processor
-FROM python:3.9-slim
+# Dockerfile for Python Processor (建議使用獨立的 Dockerfile.processor)
 
-# 安裝 Python 依賴
+# 1. 基礎映像：使用 NVIDIA 官方的 CUDA/PyTorch 映像
+# 選擇一個適合您主機 CUDA 版本的映像。這裡以最新的穩定版為例：
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+
+# 設置工作目錄
 WORKDIR /app/processor
+
+# 2. 安裝其他系統依賴 (例如 ffmpeg, librosa 相關)
+# 注意：許多 PyTorch 映像可能已經包含大部分科學計算依賴，
+# 但我們需要確保有 ffmpeg (用於處理音訊流，雖然這裡由 Node.js 處理)
+# 以及其他可能需要的庫。
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+# 3. 安裝 Python 依賴項 (使用 GPU 兼容版本)
 COPY processor/requirements.txt .
+# 假設 requirements.txt 包含：openai-whisper, redis, googletrans, numpy
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 複製應用程式碼
+# 複製您的 Python 程式碼
 COPY processor/processor.py .
 
-# 啟動 Python 程式
+# 定義啟動命令
 CMD ["python", "processor.py"]

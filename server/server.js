@@ -3,26 +3,26 @@ const WebSocket = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+// 引入 Redis
 const Redis = require('ioredis'); 
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-// ⚠️ 這是 Twitch 或 YouTube 的網頁 URL，供 yt-dlp 解析
 const LIVE_PAGE_URL = 'https://www.twitch.tv/videos/2626749881'; 
 
-// Redis 配置 (從環境變量讀取，供 Docker 使用)
+// Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
 const REDIS_PORT = parseInt(process.env.REDIS_PORT) || 6379; 
 
-const AUDIO_CHANNEL = "audio_feed";           // 📢 Node.js -> Python
-const TRANSLATION_CHANNEL = "translation_feed"; // 👂 Python -> Node.js
+const AUDIO_CHANNEL = "audio_feed";           // Node.js -> Python (發佈音頻)
+const TRANSLATION_CHANNEL = "translation_feed"; // Python -> Node.js (訂閱翻譯)
 
 let ffmpegProcess = null;
-let publisher; 
-let subscriber; 
+let publisher; // Redis publisher client
+let subscriber; // Redis subscriber client
 let wss; 
 
-// [ WebSocket 啟動和連線邏輯，保持不變 ]
+// [ WebSocket 啟動和連線邏輯 ]
 const server = http.createServer((req, res) => {
     // 服務 client.html
     if (req.url === '/') {
@@ -77,11 +77,11 @@ function initializeRedisClients() {
     subscriber.on('message', (channel, message) => {
         if (channel === TRANSLATION_CHANNEL) {
             try {
-                // Redis 傳輸保證數據清潔，直接廣播給所有 WebSocket 客戶端
-                JSON.parse(message); // 快速驗證
+                // 數據是乾淨的 JSON 字符串，直接廣播
+                JSON.parse(message); 
                 wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN) {
-                        client.send(message); // 發送原始 JSON 字符串
+                        client.send(message); 
                     }
                 });
             } catch (error) {
@@ -91,11 +91,11 @@ function initializeRedisClients() {
     });
 }
 
-// 2. 啟動 FFmpeg 處理器，並將輸出發佈到 Redis
+// 2. 啟動 FFmpeg 處理器，並將輸出 **發佈到 Redis**
 function startFFmpegProcessor(streamUrl) {
     console.log('--- 啟動 FFmpeg 進程抓取直播流 ---');
     
-    // FFmpeg 參數 (使用 16kHz 採樣率，與 Python 保持一致)
+    // FFmpeg 參數 (保持 16kHz PCM 輸出)
     const ffmpegArgs = [
         '-re', 
         '-nostdin', 
@@ -104,14 +104,14 @@ function startFFmpegProcessor(streamUrl) {
         '-loglevel', 'error', 
         '-i', streamUrl,
         '-ac', '1', 
-        '-ar', '16000', // 16kHz
-        '-acodec', 'pcm_s16le', // 16-bit PCM
+        '-ar', '16000', 
+        '-acodec', 'pcm_s16le', 
         '-f', 's16le', 
-        'pipe:1' // 輸出到 stdout
+        'pipe:1'
     ];
 
     ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-        stdio: ['ignore', 'pipe', process.stderr] // FFmpeg 的 stderr 直接管到 Node.js 的 stderr
+        stdio: ['ignore', 'pipe', process.stderr]
     });
     
     console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
@@ -121,6 +121,7 @@ function startFFmpegProcessor(streamUrl) {
         // 將 Buffer 轉換為 Base64 字符串發佈，以便 Python 接收
         const base64Audio = audioChunk.toString('base64');
         
+        // 發佈音頻數據到 Redis
         publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
             console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
         });
@@ -132,7 +133,7 @@ function startFFmpegProcessor(streamUrl) {
     });
 }
 
-// 3. 獲取直播 URL (yt-dlp 邏輯保持不變)
+// 3. 獲取直播 URL (yt-dlp 邏輯)
 function getStreamUrl(callback) {
     console.log(`--- 正在使用 yt-dlp 解析直播串流 URL: ${LIVE_PAGE_URL} ---`);
     const YTDLP_EXEC_PATH = 'yt-dlp'; 
