@@ -1,5 +1,5 @@
 # Dockerfile.server
-FROM node:18-slim
+FROM node:25.2.1-slim
 
 # 安裝 FFmpeg, yt-dlp, 和 Python
 RUN apt-get update && apt-get install -y --no-install-recommends \

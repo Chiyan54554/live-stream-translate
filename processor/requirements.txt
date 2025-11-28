@@ -1,4 +1,4 @@
-openai-whisper
+openai-whisper>=20250625
 googletrans==4.0.0-rc1
 redis
 numpy

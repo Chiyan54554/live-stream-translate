@@ -6,6 +6,7 @@ import redis
 import os
 import base64
 import io
+from contextlib import redirect_stdout
 
 # 引入 PyTorch 以檢查 CUDA 可用性，以及 Whisper 和 googletrans
 try:
@@ -65,7 +66,6 @@ def init_global_resources():
         print(f"致命錯誤：Whisper 模型載入失敗，請檢查 PyTorch 和 GPU 依賴項: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
 
-
 def whisper_asr(audio_data_b64: str) -> str:
     """
     使用 Whisper 模型將 Base64 音訊數據轉錄為文本。
@@ -74,29 +74,31 @@ def whisper_asr(audio_data_b64: str) -> str:
         return "錯誤: Whisper 模型尚未載入。"
 
     try:
-        # 1. 解碼 Base64 數據為原始 PCM 數據 (bytes)
+        # ... (音訊處理部分保持不變) ...
         raw_audio_bytes = base64.b64decode(audio_data_b64)
-        
-        # 2. 將原始 16-bit PCM 數據轉換為 Whisper 所需的 float32 Numpy 陣列
         audio_array = np.frombuffer(raw_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        
-        # 3. 關鍵修改: 將 Numpy 陣列轉換為 PyTorch Tensor 並移動到正確的 DEVICE
         audio_tensor = torch.from_numpy(audio_array).to(DEVICE)
 
         # 4. 使用 Whisper 轉錄 (直接傳遞 Tensor)
-        result = asr_model.transcribe(
-            audio_tensor, # 使用 PyTorch Tensor
-            language=SOURCE_LANG_CODE,
-            # 啟用 fp16 加速 GPU 上的推論
-            fp16=True if DEVICE == "cuda" else False, 
-            verbose=False 
-        )
+        # ====================================================================
+        # 【修正】使用 redirect_stdout 重新導向輸出到空設備 (os.devnull)，以消除進度條。
+        # ====================================================================
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f):
+                result = asr_model.transcribe(
+                    audio_tensor, # 使用 PyTorch Tensor
+                    language=SOURCE_LANG_CODE,
+                    # 啟用 fp16 加速 GPU 上的推論
+                    fp16=True if DEVICE == "cuda" else False, 
+                    verbose=False # 保持 False
+                )
+        
         return result["text"].strip()
 
     except Exception as e:
+        # ⚠️ 這裡使用 sys.stderr 輸出錯誤，不會被重定向靜音
         print(f"Whisper ASR 處理失敗: {e}", file=sys.stderr, flush=True)
         return "Whisper_ASR_FAILURE"
-
 
 def google_mt(text: str) -> str:
     """
