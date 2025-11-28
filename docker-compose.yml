@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # 1. Redis Service (消息隊列)
   redis:
-    image: redis:6.2-alpine
+    image: redis:8.4.0-alpine
     container_name: redis_pubsub
     expose:
       - "6379"
