@@ -20,8 +20,8 @@ except ImportError:
 # --- 配置參數 ---
 SAMPLE_RATE = 16000           # FFmpeg 應該輸出 16kHz
 BYTES_PER_SAMPLE = 2          # 16-bit PCM
-SOURCE_LANG_CODE = "zh-TW"       # Whisper/Googletrans 源語言 (中文)
-TARGET_LANG_CODE = "ja"       # Whisper/Googletrans 目標語言 (日文)
+SOURCE_LANG_CODE = "ja"       # Whisper/Googletrans 源語言 (日文)
+TARGET_LANG_CODE = "zh-TW"       # Whisper/Googletrans 目標語言 (中文)
 
 # Redis 配置 (從環境變量讀取，供 Docker Compose 使用)
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. Redis Service (消息隊列)
   redis:
@@ -31,7 +29,7 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: medium
+      ASR_MODEL_NAME: small
       
   # 3. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
   server:
