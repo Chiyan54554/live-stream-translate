@@ -5,12 +5,17 @@ services:
     container_name: redis_pubsub
     expose:
       - "6379"
+
+    command: redis-server --client-output-buffer-limit pubsub 128mb 32mb 60
+
     # 健康檢查確保其他服務等待 Redis 啟動
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
       timeout: 3s
       retries: 5
+    
+    restart: always
 
   # 2. Python Processor Service (Redis Subscriber/Publisher)
   processor:
@@ -29,10 +34,12 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: small
+      ASR_MODEL_NAME: medium
     
     volumes:
       - whisper_cache:/root/.cache/whisper
+
+    restart: always
       
   # 3. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
   server:
@@ -50,6 +57,8 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
+
+    restart: always
 
 volumes:
   whisper_cache:

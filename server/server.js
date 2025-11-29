@@ -17,6 +17,17 @@ const REDIS_PORT = parseInt(process.env.REDIS_PORT) || 6379;
 const AUDIO_CHANNEL = "audio_feed";           // Node.js -> Python (發佈音頻)
 const TRANSLATION_CHANNEL = "translation_feed"; // Python -> Node.js (訂閱翻譯)
 
+const SAMPLE_RATE = 16000;
+const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
+
+// 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
+const CHUNK_DURATION_S = 0.128; // 128 毫秒
+
+// 計算 Node.js 每次發佈到 Redis 所需的位元組數
+const TARGET_CHUNK_SIZE_BYTES = Math.ceil(
+    CHUNK_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE
+);
+
 let ffmpegProcess = null;
 let publisher; // Redis publisher client
 let subscriber; // Redis subscriber client
@@ -129,14 +140,29 @@ function startStreamProcessing(publisher) {
     console.log('✅ yt-dlp 輸出已成功導向 FFmpeg 進行處理 (Piping)。');
     console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
     
-    // 4. 處理 FFmpeg 的輸出 (音頻數據)
+    // 4. 處理 FFmpeg 的輸出 (音頻數據) - 【關鍵修改區】
+    let audioBuffer = Buffer.alloc(0); // 緩衝器：用於累積數據
+    
     ffmpegProcess.stdout.on('data', (audioChunk) => {
-        const base64Audio = audioChunk.toString('base64');
-        publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
-            console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
-        });
-    });
+        // 1. 將新收到的音訊數據追加到緩衝區
+        audioBuffer = Buffer.concat([audioBuffer, audioChunk]);
 
+        // 2. 循環檢查緩衝區是否達到目標塊大小
+        while (audioBuffer.length >= TARGET_CHUNK_SIZE_BYTES) {
+            // a. 擷取固定大小的音訊塊
+            const chunkToSend = audioBuffer.slice(0, TARGET_CHUNK_SIZE_BYTES);
+            
+            // b. 移除已發送的數據
+            audioBuffer = audioBuffer.slice(TARGET_CHUNK_SIZE_BYTES);
+
+            // c. Base64 編碼並發佈到 Redis
+            const base64Audio = chunkToSend.toString('base64');
+            publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
+                console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
+            });
+        }
+    });
+    
     // 5. 錯誤和關閉處理
     // 輸出 yt-dlp 的錯誤和警告
     ytdlpProcess.stderr.on('data', (data) => {

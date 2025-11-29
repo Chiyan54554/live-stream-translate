@@ -83,15 +83,26 @@ def whisper_asr(audio_data_b64: str) -> str:
         # ====================================================================
         # 【修正】使用 redirect_stdout 重新導向輸出到空設備 (os.devnull)，以消除進度條。
         # ====================================================================
-        with open(os.devnull, 'w') as f:
-            with redirect_stdout(f):
-                result = asr_model.transcribe(
-                    audio_tensor, # 使用 PyTorch Tensor
-                    language=SOURCE_LANG_CODE,
-                    # 啟用 fp16 加速 GPU 上的推論
-                    fp16=True if DEVICE == "cuda" else False, 
-                    verbose=False # 保持 False
-                )
+        # 3. 【原始 Whisper 轉錄】
+        with io.StringIO() as f, redirect_stdout(f):
+            result = asr_model.transcribe(
+                audio_tensor,
+                language=SOURCE_LANG_CODE,
+                fp16=True if DEVICE == "cuda" else False,
+                
+                # 保持 Initial Prompt 協助抗幻覺 (引導對話)
+                initial_prompt="現在、この配信は会話中です。", 
+
+                # ==========================================================
+                # 核心修正：應用最完整的結束語 Token 抑制列表
+                # 專門針對: 「最後までご視聴ありがとうございました」
+                suppress_tokens=[32205, 21840, 1023, 1970, 310, 28, 13], 
+                
+                # 保持靜音門檻 (抑制 [音訊標籤])
+                no_speech_threshold=0.75, 
+                logprob_threshold=-0.5 
+                # ==========================================================
+            )
         
         return result["text"].strip()
 
