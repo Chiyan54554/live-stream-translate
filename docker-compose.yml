@@ -6,7 +6,7 @@ services:
     expose:
       - "6379"
 
-    command: redis-server --client-output-buffer-limit pubsub 128mb 32mb 60
+    command: redis-server --client-output-buffer-limit pubsub 128mb 64mb 60
 
     # 健康檢查確保其他服務等待 Redis 啟動
     healthcheck:
@@ -34,7 +34,7 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: medium
+      ASR_MODEL_NAME: turbo
     
     volumes:
       - whisper_cache:/root/.cache/whisper

@@ -1,20 +1,23 @@
 import sys
 import json
 import time
+from datetime import datetime, timezone, timedelta
+from contextlib import redirect_stdout
 import numpy as np
 import redis
 import os
 import base64
 import io
+import re
 from contextlib import redirect_stdout
 
 # 引入 PyTorch 以檢查 CUDA 可用性，以及 Whisper 和 googletrans
 try:
     import torch 
     import whisper 
-    from googletrans import Translator
+    from deep_translator import GoogleTranslator
 except ImportError:
-    print("錯誤：運行此腳本需要安裝 'openai-whisper', 'torch', 'numpy', 'redis', 和 'googletrans'。", file=sys.stderr, flush=True)
+    print("錯誤：運行此腳本需要安裝 'openai-whisper', 'torch', 'numpy', 'redis', 和 'deep_translator'。", file=sys.stderr, flush=True)
     sys.exit(1)
 
 
@@ -31,8 +34,8 @@ REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 AUDIO_CHANNEL = "audio_feed"           # 📢 訂閱音頻的頻道
 TRANSLATION_CHANNEL = "translation_feed" # 👂 發佈翻譯結果的頻道
 
-# 從環境變數讀取模型名稱，默認使用 'tiny'
-ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'tiny') 
+# 從環境變數讀取模型名稱，默認使用 'medium'
+ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'medium') 
 
 # 確定要使用的設備：如果 CUDA 可用，則使用 GPU，否則使用 CPU
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -52,7 +55,13 @@ def init_global_resources():
     print(f"Whisper 將使用的設備: {DEVICE}", file=sys.stderr, flush=True)
 
     # 1. 初始化翻譯器
-    translator = Translator()
+    try:
+        # 🌟 修正點 3：使用 Deep Translator 實例化，並預先指定源語言和目標語言
+        translator = GoogleTranslator(source=SOURCE_LANG_CODE, target=TARGET_LANG_CODE)
+        print("翻譯引擎 (Deep Translator/Google) 初始化成功。", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"翻譯引擎初始化失敗: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
     # 2. 載入 Whisper 模型
     try:
@@ -90,17 +99,21 @@ def whisper_asr(audio_data_b64: str) -> str:
                 language=SOURCE_LANG_CODE,
                 fp16=True if DEVICE == "cuda" else False,
                 
+                beam_size=5,     # 啟用 Beam Search，提升準確度（建議值為 5）
+                patience=1.0,    # 鼓勵模型等待更完整的語句結束
+
                 # 保持 Initial Prompt 協助抗幻覺 (引導對話)
-                initial_prompt="現在、この配信は会話中です。", 
+                initial_prompt="会話中です。",
 
                 # ==========================================================
                 # 核心修正：應用最完整的結束語 Token 抑制列表
                 # 專門針對: 「最後までご視聴ありがとうございました」
-                suppress_tokens=[32205, 21840, 1023, 1970, 310, 28, 13], 
+                suppress_tokens=[-1, 50363, 50362, 50361, 50360, 50359, 
+                                 32205, 21840, 1023, 1970, 310, 28, 13], 
                 
                 # 保持靜音門檻 (抑制 [音訊標籤])
-                no_speech_threshold=0.75, 
-                logprob_threshold=-0.5 
+                no_speech_threshold=0.9, 
+                logprob_threshold=-0.4 
                 # ==========================================================
             )
         
@@ -113,19 +126,17 @@ def whisper_asr(audio_data_b64: str) -> str:
 
 def google_mt(text: str) -> str:
     """
-    使用 googletrans 進行機器翻譯。
+    使用 Deep Translator 呼叫 Google 翻譯進行機器翻譯。
     """
     if not text or translator is None:
         return ""
     try:
-        translation = translator.translate(
-            text, 
-            src=SOURCE_LANG_CODE, 
-            dest=TARGET_LANG_CODE
-        )
-        return translation.text
+        # 🌟 修正點 4：呼叫實例的 translate 方法
+        translation = translator.translate(text)
+        # Deep Translator 返回的是純文字，無需 .text
+        return translation 
     except Exception as e:
-        print(f"翻譯失敗 (googletrans error): {e}", file=sys.stderr, flush=True)
+        print(f"翻譯失敗 (Deep Translator error): {e}", file=sys.stderr, flush=True)
         return f"MT_FAILURE: {text}"
 
 # ----------------------------------------------------
@@ -136,18 +147,73 @@ def process_audio_chunk(audio_data_b64, r):
     # 執行實際的 Whisper ASR
     transcribed_text = whisper_asr(audio_data_b64)
 
-    # =======================================================
     # 【關鍵修改：檢查轉錄文本】
     # 如果轉錄文本為空字串，則直接返回，不進行翻譯和發佈
     if not transcribed_text:
         return
-    # =======================================================
+    
+    text = transcribed_text.strip()
+
+    # -----------------------------------------------------------------
+    # 【新增修正：過濾重複的結束語】
+    # 目的：防止 Whisper 在靜音或低音量時幻覺出結束語並重複輸出。
+    # -----------------------------------------------------------------
+    unwanted_phrases = [
+        "[音声なし]",
+        "ご視聴ありがとうございました。",
+        "ご視聴ありがとうございました",
+        "最後までご視聴ありがとうございました。",
+        "最後までご視聴ありがとうございました",
+        "ご視聴ありがとうございました。", # 確保包含各種標點符號的變體
+        "[音声なし]",  # 靜音標記
+        "(幕の開ける音)",
+        "(拍手)",
+        "(笑い)",
+        "(ため息)",
+        "19}",         # 您的範例中的極短噪音
+        "19",          # 預防沒有大括號
+        "}",
+    ]
+
+    # 標準化處理：移除日文句號「。」和頓號「、」，並移除多餘空格
+    normalized_text = transcribed_text.strip().replace("。", "").replace("、", "") 
+    
+    # 檢查轉錄文本是否包含在不想發佈的短語列表中
+    is_unwanted = False
+    
+    # 檢查是否包含在不想要的標記中
+    if any(marker in text for marker in unwanted_phrases):
+        is_unwanted = True
+    
+    # 檢查是否為極短且無意義的文字 (例如，少於 3 個非數字、非符號的字符)
+    # 這裡我們只檢查長度，確保不發佈單個數字或符號
+    if len(text) < 3 and not any(c.isalpha() for c in text):
+        is_unwanted = True
+
+    if is_unwanted:
+        print(f"警告: 偵測到並過濾了事件標記或噪音文本: {transcribed_text}", file=sys.stderr, flush=True)
+        return # 偵測到噪音/標記，跳過翻譯和發佈
+    
+    # 如果轉錄文本為空字串，則直接返回
+    if not text:
+        return
+    
+    # if re.search(r'[a-zA-Z]', text) or re.search(r'[а-яА-Я]', text): 
+    #     print(f"警告: 偵測到外文或亂碼（ASR 幻覺），已過濾: {text}", file=sys.stderr, flush=True)
+    #     return # 偵測到外文/亂碼，跳過翻譯和發佈
     
     # 執行實際翻譯
     translated_text = google_mt(transcribed_text)
     
     duration_seconds = 0.128 
-    timestamp = time.strftime("%H:%M:%S")
+
+    # 🌟 關鍵修正：確保時間戳記為當地時間 (UTC+8 / 台北時間)
+    # 建立時區偏移量 (台灣為 UTC+8)
+    tz = timezone(timedelta(hours=8))
+    # 取得當前 UTC 時間並轉換為指定的時區
+    current_time_cst = datetime.now(tz)
+    # 格式化輸出
+    timestamp = current_time_cst.strftime("%H:%M:%S")
     
     result = {
         "timestamp": timestamp,
