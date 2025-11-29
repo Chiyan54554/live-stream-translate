@@ -30,6 +30,9 @@ services:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
       ASR_MODEL_NAME: small
+    
+    volumes:
+      - whisper_cache:/root/.cache/whisper
       
   # 3. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
   server:
@@ -47,3 +50,7 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
+
+volumes:
+  whisper_cache:
+    driver: local  # 告訴 Docker 使用本地驅動器來儲存這個 Volume

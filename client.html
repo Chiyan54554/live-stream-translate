@@ -30,13 +30,12 @@
     <div id="container">
         <section id="live-video-section">
             <h2>直播內容 (YouTube/Twitch)</h2>
-            <iframe 
-                width="100%" 
-                height="400" 
-                src="https://www.twitch.tv/videos/2626749881" 
-                frameborder="0" 
-                allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" 
-                allowfullscreen>
+            <iframe
+                src="https://player.twitch.tv/?channel=iitifox&parent=192.168.1.x&muted=true" 
+                height="100%"
+                width="100%"
+                allowfullscreen="true"
+                frameborder="0">
             </iframe>
             <p><strong>注意：</strong> 音訊處理在伺服器端進行，請確保您的 Node.js 伺服器正在使用 FFmpeg 抓取此直播源。</p>
         </section>
