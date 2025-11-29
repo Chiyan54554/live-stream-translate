@@ -34,7 +34,7 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: turbo
+      ASR_MODEL_NAME: medium
     
     volumes:
       - whisper_cache:/root/.cache/whisper
