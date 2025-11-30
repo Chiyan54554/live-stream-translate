@@ -4,23 +4,111 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>直播實時翻譯系統 - 客戶端</title>
+    <!-- 添加 Google Fonts 支援 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- 添加 Font Awesome 圖示 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
     <style>
         /* ==================================== */
-        /* 1. 基礎和淺色模式配色 (Light Mode) */
+        /* 1. CSS 變數定義 */
         /* ==================================== */
-        body { 
-            font-family: 'Segoe UI', Roboto, "Helvetica Neue", Arial, sans-serif; /* 🌟 優化字體：更現代且跨平台 */
-            margin: 0; 
-            background-color: #f0f2f5; /* 🌟 調整：極淺灰背景，柔和不刺眼 */
-            color: #333; 
+        :root {
+            --primary-color: #4f46e5;
+            --primary-hover: #4338ca;
+            --secondary-color: #6366f1;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --error-color: #ef4444;
+            --background-primary: #ffffff;
+            --background-secondary: #f8fafc;
+            --background-tertiary: #f1f5f9;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            --radius-sm: 6px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+            --radius-xl: 16px;
         }
-        h1 { 
-            background-color: #007bff; /* 經典藍色標題欄 */
-            color: white; 
-            padding: 18px 25px; /* 🌟 調整：增加垂直間距 */
+
+        /* 深色模式變數 */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --background-primary: #1e293b;
+                --background-secondary: #0f172a;
+                --background-tertiary: #334155;
+                --text-primary: #f8fafc;
+                --text-secondary: #cbd5e1;
+                --text-muted: #64748b;
+                --border-color: #475569;
+            }
+        }
+
+        /* ==================================== */
+        /* 2. 基礎和現代化樣式 */
+        /* ==================================== */
+        * {
+            box-sizing: border-box;
+        }
+
+        body { 
+            font-family: 'Inter', 'Noto Sans TC', 'Segoe UI', sans-serif;
             margin: 0; 
-            font-size: 1.8em; 
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1); 
+            padding: 0;
+            background: linear-gradient(135deg, var(--background-secondary) 0%, var(--background-tertiary) 100%);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* 頂部導航欄 */
+        .navbar {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 1rem 0;
+            box-shadow: var(--shadow-lg);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .navbar-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        h1 { 
+            font-size: clamp(1.25rem, 4vw, 2rem);
+            font-weight: 700;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            padding: 0.5rem 1rem;
+            border-radius: var(--radius-md);
+            background-color: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
         
         /* ==================================== */
