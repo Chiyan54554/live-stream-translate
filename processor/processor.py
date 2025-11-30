@@ -43,9 +43,10 @@ BYTES_PER_SAMPLE = 2
 SOURCE_LANG_CODE = "ja"
 TARGET_LANG_CODE = "zh-TW"
 
-BUFFER_DURATION_S = 5.0
-OVERLAP_DURATION_S = 1.5
-MIN_AUDIO_ENERGY = 0.006
+# 🚀 延遲優化：縮短緩衝區 (5s -> 3s)，重疊時間 (1.5s -> 1s)
+BUFFER_DURATION_S = 3.0
+OVERLAP_DURATION_S = 1.0
+MIN_AUDIO_ENERGY = 0.005  # 略微降低門檻，避免漏掉輕聲
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -137,30 +138,30 @@ def whisper_asr(audio_array: np.ndarray) -> str:
             audio_array,
             language=SOURCE_LANG_CODE,
             
-            # 🌟 提升準確度的參數
-            beam_size=8,              # 增加搜索寬度
-            best_of=8,                # 多候選選擇
-            patience=2.0,             # 增加耐心值
+            # 🚀 延遲優化：降低 beam_size 但保持準確度
+            beam_size=5,              # 5 是速度與準確度的最佳平衡點
+            best_of=3,                # 減少候選數量
+            patience=1.5,             # 適度降低耐心值
             
-            temperature=[0.0, 0.2, 0.4],  # 多溫度回退
+            temperature=[0.0, 0.2],   # 減少溫度回退層級
             compression_ratio_threshold=2.4,
             
-            condition_on_previous_text=True,  # 利用上下文
+            condition_on_previous_text=True,  # 保持上下文 (重要！維持準確度)
             no_speech_threshold=0.5,
             log_prob_threshold=-0.8,
             
             initial_prompt=get_context_prompt(),
             
-            # 🌟 VAD 優化
+            # 🚀 VAD 優化：更快響應
             vad_filter=True,
             vad_parameters=dict(
-                threshold=0.4,
-                min_speech_duration_ms=200,
-                min_silence_duration_ms=400,
-                speech_pad_ms=250,
+                threshold=0.35,           # 略微降低門檻
+                min_speech_duration_ms=150,  # 更快開始識別
+                min_silence_duration_ms=300, # 更快結束片段
+                speech_pad_ms=200,
             ),
             
-            word_timestamps=True,
+            word_timestamps=False,    # 🚀 關閉字詞時間戳 (大幅加速！)
         )
         
         text_parts = []

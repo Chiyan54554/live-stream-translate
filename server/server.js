@@ -21,8 +21,8 @@ const SAMPLE_RATE = 16000;
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
 
 // 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
-// 🌟 增加音訊塊時長，配合 Python 端 5 秒緩衝
-const CHUNK_DURATION_S = 1.0; // 每 1 秒發送一次，Python 端累積 5 秒
+// 🚀 延遲優化：縮短音訊塊時長，更頻繁傳輸
+const CHUNK_DURATION_S = 0.5; // 每 0.5 秒發送一次，Python 端累積 3 秒
 
 // 計算 Node.js 每次發佈到 Redis 所需的位元組數
 const TARGET_CHUNK_SIZE_BYTES = Math.ceil(
