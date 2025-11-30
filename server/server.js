@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/tororo_vtuber'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/aoi_sora0821'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -162,7 +162,7 @@ function startStreamProcessing(publisher) {
             });
         }
     });
-    
+
     // 5. 錯誤和關閉處理
     // 輸出 yt-dlp 的錯誤和警告
     ytdlpProcess.stderr.on('data', (data) => {
