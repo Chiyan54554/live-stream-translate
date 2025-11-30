@@ -37,7 +37,8 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: medium
+      # 🌟 large-v3 最準確，large-v3-turbo 較快但略低準確度
+      ASR_MODEL_NAME: large-v3
       MODEL_CACHE_DIR: /root/.cache/huggingface/hub
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       # 🌟 NVIDIA 相關環境變數

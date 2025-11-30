@@ -1,6 +1,6 @@
 # Dockerfile for Python Processor (建議使用獨立的 Dockerfile.processor)
 
-# 使用 PyTorch 2.9.1 with CUDA 12.8 (支援 RTX 50 系列 sm_120)
+# 使用 PyTorch 2.9.1 with CUDA 12.8 (支援 RTX 50 系列)
 FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
 # 設定環境變數
@@ -24,16 +24,17 @@ WORKDIR /app
 # 複製 requirements
 COPY processor/requirements.txt .
 
-# 🌟 關鍵修復：安裝 cuDNN 9.x 並建立符號連結
-RUN pip install --no-cache-dir nvidia-cudnn-cu12==9.5.1.17 && \
-    # 找到 cuDNN 安裝位置並建立符號連結
-    CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])") && \
-    echo "cuDNN path: ${CUDNN_PATH}" && \
-    ls -la ${CUDNN_PATH}/lib/ && \
-    # 建立符號連結到系統路徑
-    ln -sf ${CUDNN_PATH}/lib/libcudnn*.so* /usr/local/cuda/lib64/ 2>/dev/null || true
+# 🌟 關鍵：安裝 CTranslate2 相容的 cuDNN 9.1.x
+RUN pip install --no-cache-dir nvidia-cudnn-cu12==9.1.0.70
 
-# 🌟 安裝 faster-whisper 和其他依賴
+# 🌟 建立符號連結，讓 CTranslate2 找到 cuDNN
+RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib && \
+    echo "cuDNN lib path: $CUDNN_PATH" && \
+    ls -la $CUDNN_PATH && \
+    mkdir -p /usr/local/lib/ctranslate2 && \
+    ln -sf $CUDNN_PATH/libcudnn*.so* /usr/local/lib/ctranslate2/
+
+# 安裝其他依賴
 RUN pip install --no-cache-dir \
     ctranslate2>=4.5.0 \
     faster-whisper>=1.1.0 \
@@ -41,11 +42,8 @@ RUN pip install --no-cache-dir \
     redis>=5.0.0 \
     numpy>=1.24.0
 
-# 🌟 設定 LD_LIBRARY_PATH（包含所有可能的 cuDNN 路徑）
-ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/opt/conda/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
-
 # 複製程式碼
 COPY processor/processor.py .
 
-# 🌟 啟動時動態設定 cuDNN 路徑
-CMD ["sh", "-c", "export LD_LIBRARY_PATH=$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python processor.py"]
+# 🌟 啟動時設定 LD_LIBRARY_PATH，讓 CTranslate2 優先使用我們安裝的 cuDNN
+CMD ["sh", "-c", "export LD_LIBRARY_PATH=/usr/local/lib/ctranslate2:$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python processor.py"]
