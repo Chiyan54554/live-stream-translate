@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/nekoko88'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/kohaku_uru'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -21,8 +21,8 @@ const SAMPLE_RATE = 16000;
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
 
 // 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
-// 🚀 延遲優化：縮短音訊塊時長，更頻繁傳輸
-const CHUNK_DURATION_S = 0.5; // 每 0.5 秒發送一次，Python 端累積 3 秒
+// 🌟 配合 Python 端 4 秒緩衝
+const CHUNK_DURATION_S = 0.5; // 每 0.5 秒發送一次
 
 // 計算 Node.js 每次發佈到 Redis 所需的位元組數
 const TARGET_CHUNK_SIZE_BYTES = Math.ceil(

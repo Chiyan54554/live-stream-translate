@@ -43,10 +43,9 @@ BYTES_PER_SAMPLE = 2
 SOURCE_LANG_CODE = "ja"
 TARGET_LANG_CODE = "zh-TW"
 
-# 🚀 延遲優化：縮短緩衝區 (5s -> 3s)，重疊時間 (1.5s -> 1s)
-BUFFER_DURATION_S = 3.0
-OVERLAP_DURATION_S = 1.0
-MIN_AUDIO_ENERGY = 0.005  # 略微降低門檻，避免漏掉輕聲
+# 🌟 優化緩衝配置：移除重疊，使用純累積
+BUFFER_DURATION_S = 4.0       # 4 秒緩衝
+MIN_AUDIO_ENERGY = 0.006  # 略微提高門檻，避免漏掉輕聲
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -62,11 +61,14 @@ COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 asr_model = None
 translator = None
 audio_buffer = b''
-overlap_buffer = b''
 last_transcription = ""
-last_transcriptions = deque(maxlen=3)  # 🎯 記錄最近 3 次轉錄用於去重
-context_history = deque(maxlen=8)      # 🎯 增加上下文長度 (5 -> 8)
+last_publish_time = 0  # 🌟 新增：上次發布時間
+recent_texts = deque(maxlen=10)  # 🌟 新增：最近發布的文字列表
+context_history = deque(maxlen=5)
 executor = ThreadPoolExecutor(max_workers=2)
+
+MIN_PUBLISH_INTERVAL = 1.0  # 🌟 最小發布間隔（秒）
+SIMILARITY_THRESHOLD = 0.6  # 🌟 相似度閾值
 
 def init_global_resources():
     global asr_model, translator, DEVICE, COMPUTE_TYPE
@@ -244,7 +246,7 @@ def remove_duplicate(current: str, previous: str) -> str:
         return ""
     
     # 🎯 檢查是否與最近的任何一次轉錄重複
-    for old in last_transcriptions:
+    for old in recent_texts:
         if current == old or current in old:
             return ""
     
@@ -262,30 +264,109 @@ def remove_duplicate(current: str, previous: str) -> str:
     
     return current
 
+def calculate_similarity(s1: str, s2: str) -> float:
+    """計算兩個字串的相似度 (0-1)"""
+    if not s1 or not s2:
+        return 0.0
+    if s1 == s2:
+        return 1.0
+    
+    # 使用字符集合的 Jaccard 相似度
+    set1 = set(s1)
+    set2 = set(s2)
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+    
+    if union == 0:
+        return 0.0
+    
+    return intersection / union
+
+def is_duplicate_or_overlap(text: str) -> bool:
+    """檢查文字是否與最近發布的內容重複或高度重疊"""
+    global recent_texts, last_transcription
+    
+    if not text:
+        return True
+    
+    # 檢查是否完全重複
+    if text == last_transcription:
+        return True
+    
+    # 檢查是否為子字串
+    if text in last_transcription or last_transcription in text:
+        # 如果新文字是舊文字的子字串，跳過
+        if text in last_transcription:
+            return True
+        # 如果舊文字是新文字的子字串，計算新增部分
+        # 不視為重複，稍後會處理
+    
+    # 檢查與最近文字的相似度
+    for recent in recent_texts:
+        similarity = calculate_similarity(text, recent)
+        if similarity > SIMILARITY_THRESHOLD:
+            return True
+    
+    return False
+
+def extract_new_content(current: str, previous: str) -> str:
+    """提取新內容，移除與前一次重疊的部分"""
+    if not previous or not current:
+        return current
+    
+    if current == previous:
+        return ""
+    
+    # 如果前一次是當前的子字串，提取新增部分
+    if previous in current:
+        idx = current.find(previous)
+        if idx == 0:
+            # 前綴重複，取後面的新內容
+            return current[len(previous):].strip()
+        elif idx + len(previous) == len(current):
+            # 後綴重複，取前面的新內容
+            return current[:idx].strip()
+    
+    # 檢查前綴重疊
+    for i in range(min(len(previous), len(current)), 0, -1):
+        if previous[-i:] == current[:i]:
+            new_part = current[i:].strip()
+            # 只有當新部分有意義時才返回
+            if len(new_part) >= 2:
+                return new_part
+            return ""
+    
+    # 檢查後綴重疊
+    for i in range(min(len(previous), len(current)), 0, -1):
+        if previous[:i] == current[-i:]:
+            new_part = current[:-i].strip()
+            if len(new_part) >= 2:
+                return new_part
+            return ""
+    
+    return current
+
 # ----------------------------------------------------
 # 核心處理函數
 # ----------------------------------------------------
 
 def process_audio_chunk(audio_data_b64: str, r):
-    """處理音訊塊，使用滑動視窗機制。"""
-    global audio_buffer, overlap_buffer, last_transcription
+    """處理音訊塊"""
+    global audio_buffer, last_transcription, last_publish_time, recent_texts
     
     # 解碼音訊
     raw_bytes = base64.b64decode(audio_data_b64)
-    audio_buffer = overlap_buffer + audio_buffer + raw_bytes
+    audio_buffer += raw_bytes  # 🌟 簡化：純累積，不使用重疊緩衝
     
     # 計算目標大小
     target_size = int(BUFFER_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
-    overlap_size = int(OVERLAP_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
     
     if len(audio_buffer) < target_size:
         return
     
-    # 取出處理的音訊
+    # 取出處理的音訊，清空緩衝區
     audio_to_process = audio_buffer[:target_size]
-    # 🌟 保留重疊部分供下次使用
-    overlap_buffer = audio_buffer[target_size - overlap_size:target_size]
-    audio_buffer = audio_buffer[target_size:]
+    audio_buffer = b''  # 🌟 完全清空，避免重疊
     
     # 轉換為 numpy array
     audio_array = np.frombuffer(audio_to_process, dtype=np.int16).astype(np.float32) / 32768.0
@@ -294,23 +375,35 @@ def process_audio_chunk(audio_data_b64: str, r):
     text = whisper_asr(audio_array)
     # 過濾文字
     text = filter_text(text)
+    
     if not text:
         return
     
-    # 🎯 去除重複 (使用歷史記錄)
-    text = remove_duplicate(text, last_transcription)
-    if not text:
+    # 🌟 改進的去重邏輯
+    # 1. 檢查是否與最近內容重複
+    if is_duplicate_or_overlap(text):
         return
     
-    # 🎯 更新歷史記錄
+    # 2. 提取新內容
+    text = extract_new_content(text, last_transcription)
+    if not text or len(text) < 2:
+        return
+    
+    # 3. 檢查發布間隔
+    current_time = time.time()
+    if current_time - last_publish_time < MIN_PUBLISH_INTERVAL:
+        # 如果間隔太短，將文字暫存
+        pass
+    
+    # 更新狀態
     last_transcription = text
-    last_transcriptions.append(text)
+    last_publish_time = current_time
+    recent_texts.append(text)
     
-    # 🌟 並行執行翻譯
-    future = executor.submit(google_mt, text)
-    translation = future.result(timeout=5)
+    # 翻譯
+    translation = executor.submit(google_mt, text).result(timeout=5)
     
-    # 時間戳
+    # 發布結果
     tz = timezone(timedelta(hours=8))
     result = {
         "timestamp": datetime.now(tz).strftime("%H:%M:%S"),
