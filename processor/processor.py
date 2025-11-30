@@ -112,7 +112,7 @@ def whisper_asr(audio_data_b64: str) -> str:
                                  32205, 21840, 1023, 1970, 310, 28, 13], 
                 
                 # 保持靜音門檻 (抑制 [音訊標籤])
-                no_speech_threshold=0.9, 
+                no_speech_threshold=0.7, 
                 logprob_threshold=-0.4 
                 # ==========================================================
             )
@@ -153,6 +153,28 @@ def process_audio_chunk(audio_data_b64, r):
         return
     
     text = transcribed_text.strip()
+
+    # === 【新增修正：強制日文/常用字符過濾】 ===
+    # 目的：移除韓文、俄文、德文 (非拉丁字母) 等亂碼，只保留日文、英文、數字和常用符號。
+
+    # 允許的字符範圍 (日文假名/漢字/平假名/片假名、常用標點、數字、基本拉丁字母)
+    # \u3040-\u309F: 平假名; \u30A0-\u30FF: 片假名; \u4E00-\u9FFF: 漢字; 
+    # \uFF00-\uFFEF: 全形符號; \u0020-\u007E: 基本拉丁字母 (英文, 數字, 標點)
+    japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF\u0020-\u007E]+')
+
+    # 僅保留匹配日文/英文/數字/符號的連續區塊
+    filtered_segments = japanese_pattern.findall(text)
+
+    # 將所有通過過濾的區塊重新連接成單一句子
+    cleaned_text = "".join(filtered_segments).strip()
+
+    # 更新用於後續流程的文本
+    transcribed_text = cleaned_text 
+    text = cleaned_text
+
+    if not text:
+        print("警告: ASR 文本經過字符過濾後變為空字串，已跳過。", file=sys.stderr, flush=True)
+        return
 
     # -----------------------------------------------------------------
     # 【新增修正：過濾重複的結束語】

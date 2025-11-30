@@ -1,25 +1,146 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>直播實時翻譯系統 - Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播實時翻譯系統 - 客戶端</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
-        #container { max-width: 1200px; margin: auto; display: flex; gap: 20px; }
-        #live-video-section { flex: 2; }
-        #translation-section { flex: 1; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1, h2 { color: #333; }
-        #status { padding: 10px; margin-bottom: 15px; border-radius: 4px; font-weight: bold; }
-        .status-ready { background-color: #d4edda; color: #155724; }
-        .status-error { background-color: #f8d7da; color: #721c24; }
+        /* ==================================== */
+        /* 1. 基礎和淺色模式配色 (Light Mode) */
+        /* ==================================== */
+        body { 
+            font-family: 'Segoe UI', Roboto, "Helvetica Neue", Arial, sans-serif; /* 🌟 優化字體：更現代且跨平台 */
+            margin: 0; 
+            background-color: #f0f2f5; /* 🌟 調整：極淺灰背景，柔和不刺眼 */
+            color: #333; 
+        }
+        h1 { 
+            background-color: #007bff; /* 經典藍色標題欄 */
+            color: white; 
+            padding: 18px 25px; /* 🌟 調整：增加垂直間距 */
+            margin: 0; 
+            font-size: 1.8em; 
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1); 
+        }
         
-        #results { list-style: none; padding: 0; }
-        .translation-item { margin-bottom: 15px; padding: 10px; border-left: 5px solid #007bff; background-color: #f9f9f9; border-radius: 4px; opacity: 0; animation: fadeIn 0.5s forwards; }
-        .transcription { color: #555; font-style: italic; font-size: 0.9em; margin-bottom: 5px; }
-        .translation { font-weight: bold; color: #000; font-size: 1.1em; }
+        /* ==================================== */
+        /* 2. 佈局和結構 */
+        /* ==================================== */
+        #container { 
+            display: grid;
+            grid-template-columns: 2fr 1fr; 
+            max-width: 1300px; /* 🌟 調整：略微收窄最大寬度 */
+            margin: 25px auto; /* 🌟 調整：增加邊距 */
+            gap: 25px; /* 🌟 調整：增加間隙 */
+            padding: 0 25px;
+        }
+        
+        @media (max-width: 1000px) {
+            #container {
+                grid-template-columns: 1fr; 
+            }
+        }
+        
+        /* 視訊區 */
+        #live-video-section { 
+            background-color: #ffffff; /* 🌟 調整：純白背景 */
+            border-radius: 12px; /* 🌟 調整：更大的圓角 */
+            overflow: hidden; 
+            aspect-ratio: 16 / 9; 
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2); /* 🌟 調整：柔和且明顯的陰影 */
+        }
+        #live-video-section iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            title: "Twitch 直播串流視窗"; 
+        }
+        /* 視訊區下的提醒文字 */
+        #live-video-section p {
+            color: #f0f2f5; /* 淺色字體在深色背景上 */
+            padding: 10px;
+        }
 
+
+        /* 翻譯區 */
+        #translation-section { 
+            background-color: #ffffff; /* 🌟 調整：純白背景 */
+            padding: 25px; 
+            border-radius: 12px; /* 🌟 調整：更大的圓角 */
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1); 
+            display: flex;
+            flex-direction: column;
+        }
+        
+        h2 { 
+            color: #007bff; 
+            margin-top: 0; 
+            border-bottom: 1px solid #ddd; /* 🌟 調整：淺色分隔線 */
+            padding-bottom: 12px; 
+            font-size: 1.5em; /* 🌟 調整：標題字體大小 */
+        }
+        
+        /* ==================================== */
+        /* 3. 狀態標籤 (柔和配色) */
+        /* ==================================== */
+        #status { 
+            padding: 12px; 
+            margin-bottom: 20px; 
+            border-radius: 8px; /* 🌟 調整：圓角適中 */
+            font-weight: bold; 
+            font-size: 0.95em;
+        }
+        /* 柔和的狀態配色 */
+        .status-ready { background-color: #e6f7e9; color: #388e3c; border: 1px solid #c8e6c9; } /* 🌟 優化：柔和綠色 */
+        .status-error { background-color: #ffebee; color: #d32f2f; border: 1px solid #ffcdd2; } /* 🌟 優化：柔和紅色 */
+        .status-connecting { background-color: #fffde7; color: #ffb300; border: 1px solid #fff9c4; } /* 🌟 優化：柔和黃色 */
+
+        /* ==================================== */
+        /* 4. 結果列表排版 */
+        /* ==================================== */
+        #results { 
+            list-style: none; 
+            padding: 0; 
+            margin: 0; 
+            flex-grow: 1; 
+            display: flex; 
+            flex-direction: column-reverse; 
+            overflow-y: auto; 
+            max-height: 70vh; 
+        } 
+        .translation-item { 
+            margin-bottom: 20px; /* 🌟 調整：更大的底部間距 */
+            padding: 15px; 
+            border-left: 4px solid #007bff; /* 🌟 調整：使用主藍色分隔條 */
+            background-color: #ffffff; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08); /* 🌟 調整：更輕的陰影 */
+            opacity: 0; 
+            animation: fadeIn 0.5s forwards; 
+            transition: all 0.3s ease;
+        }
+        
+        /* 轉錄文本 (日文) */
+        .transcription { 
+            color: #777; /* 🌟 調整：中灰色，作為輔助資訊 */
+            font-style: italic; 
+            font-size: 0.85em; 
+            margin-bottom: 8px; 
+            border-bottom: 1px dashed #eee; 
+            padding-bottom: 8px;
+            line-height: 1.3;
+        }
+        /* 翻譯結果 (中文) */
+        .translation { 
+            font-weight: 600; /* 🌟 調整：使用較粗的字重 */
+            color: #111; /* 🌟 調整：接近純黑，最高可讀性 */
+            font-size: 1.4em; /* 🌟 調整：顯著放大 */
+            line-height: 1.5; 
+        }
+
+        /* 動畫效果 */
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
+            from { opacity: 0; transform: translateY(15px); }
             to { opacity: 1; transform: translateY(0); }
         }
     </style>
@@ -29,51 +150,58 @@
 
     <div id="container">
         <section id="live-video-section">
-            <h2>直播內容 (YouTube/Twitch)</h2>
+            <h2>直播內容 (Twitch 範例)</h2>
             <iframe
-                src="https://player.twitch.tv/?channel=iitifox&parent=192.168.1.x&muted=true" 
-                height="100%"
-                width="100%"
+                src="https://player.twitch.tv/?channel=iitifox&parent=YOUR_DOMAIN_OR_IP_ADDRESS&muted=true" 
                 allowfullscreen="true"
-                frameborder="0">
+                allow="autoplay; encrypted-media"
+                frameborder="0"
+                title="Twitch 直播串流視窗">
             </iframe>
             <p><strong>注意：</strong> 音訊處理在伺服器端進行，請確保您的 Node.js 伺服器正在使用 FFmpeg 抓取此直播源。</p>
         </section>
 
         <section id="translation-section">
             <h2>實時翻譯結果</h2>
-            <div id="status" class="status-error">連線狀態: 正在嘗試連接伺服器...</div>
+            <div id="status" class="status-connecting">連線狀態: 正在嘗試連接伺服器...</div>
             <ul id="results">
-                <li>等待第一個翻譯片段...</li>
+                <li style="opacity: 1; border-left: 4px solid #ccc; background-color: #f7f7f7; color: #777; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: none;">等待第一個翻譯片段...</li>
             </ul>
         </section>
     </div>
 
     <script>
-        const WSS_URL = 'ws://localhost:8080'; // 必须匹配 server.js 的端口
-        /** ⭐ 新增：設定列表最大顯示數量 ⭐ */
-        const MAX_RESULTS = 4; 
+        // 嘗試從當前 host 獲取 WebSocket URL，如果不是 http/https 則回退到 localhost
+        const getWsUrl = () => {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            if (window.location.protocol === 'file:' || !window.location.host) {
+                return 'ws://localhost:8080'; 
+            }
+            return `${protocol}//${window.location.host.split(':')[0]}:8080`;
+        };
+
+        const WSS_URL = getWsUrl();
+        const MAX_RESULTS = 5; 
         
         const resultsList = document.getElementById('results');
         const statusDiv = document.getElementById('status');
         let socket;
 
-        function updateStatus(message, isError = false) {
+        function updateStatus(message, statusType = 'connecting') {
             statusDiv.textContent = '連線狀態: ' + message;
-            statusDiv.className = isError ? 'status-error' : 'status-ready';
+            statusDiv.className = 'status-' + statusType;
         }
 
         function connectWebSocket() {
-            if (socket) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
                 socket.close();
             }
-            updateStatus('正在連接...', false);
+            updateStatus(`正在連接伺服器 (${WSS_URL})...`, 'connecting'); 
 
             socket = new WebSocket(WSS_URL);
 
             socket.onopen = function() {
-                updateStatus('連接成功！等待伺服器傳輸翻譯結果...', false);
-                // 移除初始化提示
+                updateStatus('連接成功！等待伺服器傳輸翻譯結果...', 'ready');
                 if (resultsList.children[0] && resultsList.children[0].textContent.includes('等待')) {
                     resultsList.innerHTML = '';
                 }
@@ -81,59 +209,56 @@
 
             socket.onmessage = function(event) {
                 try {
-                    // 接收並解析 Python 傳回的 JSON 字符串
                     const data = JSON.parse(event.data); 
                     
                     if (data.status === 'error') {
-                         updateStatus(`伺服器錯誤: ${data.message}`, true);
+                         updateStatus(`伺服器錯誤: ${data.message}`, 'error');
                          return;
                     }
+                    
+                    if (!data.transcription && !data.translation) {
+                        return; 
+                    }
 
-                    // 渲染翻譯結果
                     const listItem = document.createElement('li');
                     listItem.className = 'translation-item';
                     
                     // 原始轉錄
                     const transDiv = document.createElement('div');
                     transDiv.className = 'transcription';
-                    transDiv.textContent = `(${data.timestamp}) [${data.source_lang}]: ${data.transcription || '（轉錄中...）'}`;
+                    transDiv.textContent = `(${data.timestamp ?? 'NA'}) [${data.source_lang ?? 'ja'}]: ${data.transcription ?? '（轉錄中...）'}`;
                     
                     // 翻譯結果
                     const trDiv = document.createElement('div');
                     trDiv.className = 'translation';
-                    trDiv.textContent = `[${data.target_lang}]: ${data.translation || '（翻譯中...）'}`;
+                    trDiv.textContent = `[${data.target_lang ?? 'zh-TW'}]: ${data.translation ?? '（翻譯中...）'}`;
                     
                     listItem.appendChild(transDiv);
                     listItem.appendChild(trDiv);
                     
-                    // 將最新結果添加到列表頂部
-                    resultsList.prepend(listItem);
+                    resultsList.appendChild(listItem); 
                     
-                    /** ⭐ 新增：檢查列表長度並移除最舊的項目 ⭐ */
+                    // 檢查列表長度並移除最舊的項目 
                     while (resultsList.children.length > MAX_RESULTS) {
-                        // 移除列表中的最後一個子元素 (最舊的項目)
-                        resultsList.removeChild(resultsList.lastChild);
+                        resultsList.removeChild(resultsList.firstChild);
                     }
                     
                 } catch (error) {
                     console.error("無法解析接收到的數據:", event.data);
-                    updateStatus('接收到無效數據，請檢查 Python 輸出格式。', true);
+                    updateStatus('接收到無效數據，請檢查 Python 輸出格式。', 'error');
                 }
             };
 
             socket.onclose = function(event) {
-                updateStatus('連接已斷開，嘗試在 5 秒後重連...', true);
-                // 自動重連機制
+                updateStatus(`連接已斷開 (${event.code})，嘗試在 5 秒後重連...`, 'error');
                 setTimeout(connectWebSocket, 5000); 
             };
 
             socket.onerror = function(error) {
                 console.error('WebSocket 錯誤:', error);
-                updateStatus('WebSocket 發生錯誤！', true);
             };
         }
 
-        // 頁面載入完成後立即嘗試連接
         window.onload = connectWebSocket;
     </script>
 </body>
