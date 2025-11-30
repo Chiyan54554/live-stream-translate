@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/kohaku_uru'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/chi_chaan'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -109,17 +109,33 @@ function startStreamProcessing(publisher) {
     const YTDLP_EXEC_PATH = 'yt-dlp';
     const FFMPEG_EXEC_PATH = 'ffmpeg';
     
-    // 1. 啟動 yt-dlp，要求它將音頻流輸出到 stdout ('-o', '-')
-    // 我們同時要求 yt-dlp 輸出日誌到 stderr，方便除錯。
-    const ytdlpProcess = spawn(YTDLP_EXEC_PATH, [
-        '-f', 'bestaudio', 
+    // 🎯 判斷平台並設定對應參數
+    const isYouTube = LIVE_PAGE_URL.includes('youtube.com') || LIVE_PAGE_URL.includes('youtu.be');
+    const isTwitch = LIVE_PAGE_URL.includes('twitch.tv');
+    
+    // 1. 啟動 yt-dlp
+    const ytdlpArgs = [
+        '-f', 'bestaudio/best',     // 🎯 改進：優先音訊，備選最佳
         '--no-warnings',
         '--force-ipv4',
-        '--referer', 'https://www.twitch.tv/',  // 模擬從網頁發起連線
-        '--no-check-certificate',               // 忽略 SSL/TLS 證書檢查 (有時能解決握手問題)
-        '-o', '-', 
-        LIVE_PAGE_URL
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        '--no-check-certificate',
+        '--no-playlist',            // 🎯 不下載播放清單
+        '-o', '-',
+    ];
+    
+    // 🎯 平台特定參數
+    if (isYouTube) {
+        ytdlpArgs.push('--live-from-start');  // 從直播開始處理
+        ytdlpArgs.push('--extractor-args', 'youtube:skip=dash');  // 跳過 DASH 以加速
+    } else if (isTwitch) {
+        ytdlpArgs.push('--referer', 'https://www.twitch.tv/');
+    }
+    
+    ytdlpArgs.push(LIVE_PAGE_URL);
+    
+    const ytdlpProcess = spawn(YTDLP_EXEC_PATH, ytdlpArgs, { 
+        stdio: ['ignore', 'pipe', 'pipe'] 
+    });
 
     // 2. 啟動 FFmpeg，從 stdin 讀取音頻 ('-i', 'pipe:0')
     const ffmpegArgs = [
@@ -164,15 +180,19 @@ function startStreamProcessing(publisher) {
         }
     });
 
-    // 5. 錯誤和關閉處理
-    // 輸出 yt-dlp 的錯誤和警告
+    // 5. 🎯 改進錯誤處理：輸出 yt-dlp 的詳細錯誤
     ytdlpProcess.stderr.on('data', (data) => {
-        // 大部分是警告，但仍需注意
-        // console.error(`[yt-dlp 警告/錯誤]: ${data.toString().trim()}`); 
+        const msg = data.toString().trim();
+        if (msg.includes('ERROR') || msg.includes('error')) {
+            console.error(`[yt-dlp 錯誤]: ${msg}`);
+        }
     });
     ytdlpProcess.on('error', (err) => console.error('致命錯誤：yt-dlp 啟動失敗:', err));
     ytdlpProcess.on('close', (code) => {
-        if (code !== 0) console.error(`yt-dlp 进程退出, Code: ${code}. 直播流可能中斷。`);
+        if (code !== 0) {
+            console.error(`yt-dlp 进程退出, Code: ${code}. 10 秒後嘗試重連...`);
+            setTimeout(() => startStreamProcessing(publisher), 10000);
+        }
     });
     
     // 輸出 FFmpeg 的錯誤和警告 (通常是進度信息，可以註釋掉以減少日誌)
@@ -181,8 +201,9 @@ function startStreamProcessing(publisher) {
     });
     ffmpegProcess.on('error', (err) => console.error('致命錯誤：FFmpeg 啟動失敗:', err));
     ffmpegProcess.on('close', (code) => {
-        console.log(`FFmpeg 进程退出, Code: ${code}. 正在嘗試重連...`);
-        // 注意：這裡可以加入重連邏輯，但目前先以啟動成功為目標。
+        if (code !== 0) {
+            console.log(`FFmpeg 进程退出, Code: ${code}.`);
+        }
     });
 }
 
