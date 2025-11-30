@@ -1,27 +1,51 @@
 # Dockerfile for Python Processor (建議使用獨立的 Dockerfile.processor)
 
-# 1. 基礎映像：使用 NVIDIA 官方的 CUDA/PyTorch 映像
-# 選擇一個適合您主機 CUDA 版本的映像。這裡以最新的穩定版為例：
+# 使用 PyTorch 2.9.1 with CUDA 12.8 (支援 RTX 50 系列 sm_120)
 FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
-# 設置工作目錄
+# 設定環境變數
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/root/.cache/huggingface
+ENV MODEL_CACHE_DIR=/root/.cache/huggingface/hub
+
+# 安裝必要套件
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 建立快取目錄
+RUN mkdir -p /root/.cache/huggingface/hub
+
+# 設定工作目錄
 WORKDIR /app
 
-# 2. 安裝其他系統依賴 (例如 ffmpeg, librosa 相關)
-# 注意：許多 PyTorch 映像可能已經包含大部分科學計算依賴，
-# 但我們需要確保有 ffmpeg (用於處理音訊流，雖然這裡由 Node.js 處理)
-# 以及其他可能需要的庫。
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
-
-# 3. 安裝 Python 依賴項 (使用 GPU 兼容版本)
+# 複製 requirements
 COPY processor/requirements.txt .
-# 假設 requirements.txt 包含：openai-whisper, redis, googletrans, numpy
-RUN pip install --no-cache-dir -r requirements.txt
 
-# 複製您的 Python 程式碼
+# 🌟 關鍵修復：安裝 cuDNN 9.x 並建立符號連結
+RUN pip install --no-cache-dir nvidia-cudnn-cu12==9.5.1.17 && \
+    # 找到 cuDNN 安裝位置並建立符號連結
+    CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])") && \
+    echo "cuDNN path: ${CUDNN_PATH}" && \
+    ls -la ${CUDNN_PATH}/lib/ && \
+    # 建立符號連結到系統路徑
+    ln -sf ${CUDNN_PATH}/lib/libcudnn*.so* /usr/local/cuda/lib64/ 2>/dev/null || true
+
+# 🌟 安裝 faster-whisper 和其他依賴
+RUN pip install --no-cache-dir \
+    ctranslate2>=4.5.0 \
+    faster-whisper>=1.1.0 \
+    deep-translator>=1.11.4 \
+    redis>=5.0.0 \
+    numpy>=1.24.0
+
+# 🌟 設定 LD_LIBRARY_PATH（包含所有可能的 cuDNN 路徑）
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/opt/conda/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
+
+# 複製程式碼
 COPY processor/processor.py .
 
-# 定義啟動命令
-CMD ["python", "processor.py"]
+# 🌟 啟動時動態設定 cuDNN 路徑
+CMD ["sh", "-c", "export LD_LIBRARY_PATH=$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python processor.py"]

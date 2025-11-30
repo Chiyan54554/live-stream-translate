@@ -25,19 +25,27 @@ services:
     container_name: python_processor
     
     # 配置 GPU 支持
-    gpus: all 
-
-    depends_on:
-      redis:
-        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     
+    # 🌟 新增：設定 NVIDIA 環境變數
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      ASR_MODEL_NAME: turbo
+      ASR_MODEL_NAME: medium
+      MODEL_CACHE_DIR: /root/.cache/huggingface/hub
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # 🌟 NVIDIA 相關環境變數
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     
     volumes:
-      - whisper_cache:/root/.cache/whisper
+      - huggingface_cache:/root/.cache/huggingface
 
     restart: always
       
@@ -61,5 +69,5 @@ services:
     restart: always
 
 volumes:
-  whisper_cache:
-    driver: local  # 告訴 Docker 使用本地驅動器來儲存這個 Volume
+  huggingface_cache:
+    driver: local

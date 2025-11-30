@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/aoi_sora0821'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/tokoyamitowa_holo'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -21,7 +21,8 @@ const SAMPLE_RATE = 16000;
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
 
 // 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
-const CHUNK_DURATION_S = 0.128; // 128 毫秒
+// 🌟 增加音訊塊時長，讓 Whisper 獲得更完整的語句上下文
+const CHUNK_DURATION_S = 2.0; // 從 0.128 秒增加到 2 秒
 
 // 計算 Node.js 每次發佈到 Redis 所需的位元組數
 const TARGET_CHUNK_SIZE_BYTES = Math.ceil(

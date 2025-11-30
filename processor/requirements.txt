@@ -1,4 +1,5 @@
-openai-whisper>=20250625
-deep-translator
-redis
-numpy
+faster-whisper>=1.0.0
+deep-translator>=1.11.4
+redis>=5.0.0
+numpy>=1.24.0
+torch>=2.0.0
