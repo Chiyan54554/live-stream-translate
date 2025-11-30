@@ -64,7 +64,8 @@ translator = None
 audio_buffer = b''
 overlap_buffer = b''
 last_transcription = ""
-context_history = deque(maxlen=5)
+last_transcriptions = deque(maxlen=3)  # 🎯 記錄最近 3 次轉錄用於去重
+context_history = deque(maxlen=8)      # 🎯 增加上下文長度 (5 -> 8)
 executor = ThreadPoolExecutor(max_workers=2)
 
 def init_global_resources():
@@ -122,11 +123,16 @@ def check_voice_activity(audio_array: np.ndarray) -> bool:
     return rms > MIN_AUDIO_ENERGY
 
 def get_context_prompt() -> str:
-    """生成上下文提示"""
+    """生成上下文提示 - 針對直播優化"""
+    # 🎯 更精確的場景描述，幫助 Whisper 理解語境
+    base_prompt = "これは日本語のライブ配信です。配信者がリスナーと会話しています。"
+    
     if not context_history:
-        return "これは日本語の会話です。"
-    recent = "。".join(list(context_history)[-3:])
-    return f"これは日本語の会話です。{recent}"
+        return base_prompt
+    
+    # 取最近 4 句作為上下文（不要太長以免誤導）
+    recent = "。".join(list(context_history)[-4:])
+    return f"{base_prompt} {recent}"
 
 def whisper_asr(audio_array: np.ndarray) -> str:
     """使用 faster-whisper 進行語音辨識。"""
@@ -138,42 +144,45 @@ def whisper_asr(audio_array: np.ndarray) -> str:
             audio_array,
             language=SOURCE_LANG_CODE,
             
-            # 🚀 延遲優化：降低 beam_size 但保持準確度
-            beam_size=5,              # 5 是速度與準確度的最佳平衡點
-            best_of=3,                # 減少候選數量
-            patience=1.5,             # 適度降低耐心值
+            # 🎯 準確度優化 (不增加延遲)
+            beam_size=5,              # 維持速度
+            best_of=5,                # 🎯 增加候選數量 (3 -> 5)，提升準確度
+            patience=1.8,             # 🎯 略微增加耐心值 (1.5 -> 1.8)
             
-            temperature=[0.0, 0.2],   # 減少溫度回退層級
-            compression_ratio_threshold=2.4,
+            temperature=[0.0, 0.15, 0.3],  # 🎯 更細緻的溫度回退
+            compression_ratio_threshold=2.2,  # 🎯 更嚴格的壓縮比 (過濾重複)
             
-            condition_on_previous_text=True,  # 保持上下文 (重要！維持準確度)
-            no_speech_threshold=0.5,
-            log_prob_threshold=-0.8,
+            condition_on_previous_text=True,  # 保持上下文
+            no_speech_threshold=0.6,   # 🎯 提高靜音門檻 (0.5 -> 0.6)
+            log_prob_threshold=-0.7,   # 🎯 更嚴格的置信度 (-0.8 -> -0.7)
             
             initial_prompt=get_context_prompt(),
             
-            # 🚀 VAD 優化：更快響應
+            # 🎯 VAD 優化：平衡響應與準確度
             vad_filter=True,
             vad_parameters=dict(
-                threshold=0.35,           # 略微降低門檻
-                min_speech_duration_ms=150,  # 更快開始識別
-                min_silence_duration_ms=300, # 更快結束片段
-                speech_pad_ms=200,
+                threshold=0.4,            # 🎯 稍微提高門檻 (減少噪音)
+                min_speech_duration_ms=180,  # 🎯 略微增加最小語音長度
+                min_silence_duration_ms=350, # 🎯 適度增加靜音判定
+                speech_pad_ms=220,
             ),
             
-            word_timestamps=False,    # 🚀 關閉字詞時間戳 (大幅加速！)
+            word_timestamps=False,    # 維持關閉以保持速度
         )
         
         text_parts = []
         for seg in segments:
-            # 過濾低置信度片段
-            if seg.avg_logprob > -0.9 and seg.no_speech_prob < 0.6:
+            # 🎯 更嚴格的置信度過濾
+            if seg.avg_logprob > -0.7 and seg.no_speech_prob < 0.5:
+                text_parts.append(seg.text)
+            elif seg.avg_logprob > -0.85 and seg.no_speech_prob < 0.3:
+                # 🎯 次優但高確定性的片段也接受
                 text_parts.append(seg.text)
         
         result = "".join(text_parts).strip()
         
-        # 更新上下文
-        if result and len(result) > 3:
+        # 🎯 更新上下文 (只保留有意義的內容)
+        if result and len(result) >= 4:
             context_history.append(result)
         
         return result
@@ -201,12 +210,18 @@ def filter_text(text: str) -> str:
     pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF\u0020-\u007E]+')
     cleaned = "".join(pattern.findall(text)).strip()
     
-    # 🌟 擴展過濾列表
+    # 🎯 擴展幻覺過濾列表 (針對直播場景)
     unwanted = [
+        # 常見幻覺
         "[音声なし]", "ご視聴ありがとう", "最後までご視聴",
         "(拍手)", "(笑い)", "(ため息)", "字幕",
         "チャンネル登録", "高評価", "MBSニュース",
-        "提供は", "ご覧いただき",
+        "提供は", "ご覧いただき", "ありがとうございました",
+        # 🎯 新增：更多幻覺模式
+        "お疲れ様でした", "また会いましょう", "バイバイ",
+        "次回も", "チャンネル", "登録", "お願いします",
+        "♪", "BGM", "音楽", "エンディング",
+        "テロップ", "ナレーション", "アナウンス",
     ]
     
     for phrase in unwanted:
@@ -228,13 +243,20 @@ def remove_duplicate(current: str, previous: str) -> str:
     if current == previous or current in previous:
         return ""
     
-    # 🌟 改進重疊檢測
+    # 🎯 檢查是否與最近的任何一次轉錄重複
+    for old in last_transcriptions:
+        if current == old or current in old:
+            return ""
+    
+    # 🎯 改進重疊檢測
     if previous in current:
         idx = current.find(previous)
         if idx == 0:
             return current[len(previous):].strip()
     
-    for i in range(min(len(previous), len(current)), 0, -1):
+    # 🎯 更智能的後綴-前綴重疊檢測
+    max_overlap = min(len(previous), len(current), 20)  # 限制檢測長度
+    for i in range(max_overlap, 2, -1):  # 至少 3 個字符才算重疊
         if previous[-i:] == current[:i]:
             return current[i:].strip()
     
@@ -275,12 +297,14 @@ def process_audio_chunk(audio_data_b64: str, r):
     if not text:
         return
     
-    # 🌟 去除重複
+    # 🎯 去除重複 (使用歷史記錄)
     text = remove_duplicate(text, last_transcription)
     if not text:
         return
     
+    # 🎯 更新歷史記錄
     last_transcription = text
+    last_transcriptions.append(text)
     
     # 🌟 並行執行翻譯
     future = executor.submit(google_mt, text)
