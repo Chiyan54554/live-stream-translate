@@ -23,13 +23,13 @@
 
 ```mermaid
 graph TD
-    Live[直播源 (Twitch)] -->|yt-dlp/ffmpeg| Node[Node.js Server]
-    Node -->|音訊數據 (Pub)| Redis[(Redis Message Broker)]
-    Redis -->|音訊數據 (Sub)| Python[Python Processor]
-    Python -->|Whisper ASR + 翻譯| Python
-    Python -->|翻譯結果 (Pub)| Redis
-    Redis -->|翻譯結果 (Sub)| Node
-    Node -->|WebSocket| Client[Web Client (Browser)]
+    Live["直播源 (Twitch)"] -->|yt-dlp/ffmpeg| Node["Node.js Server"]
+    Node -->|"音訊數據 (Pub)"| Redis[("Redis Message Broker")]
+    Redis -->|"音訊數據 (Sub)"| Python["Python Processor"]
+    Python -->|"Whisper ASR + 翻譯"| Python
+    Python -->|"翻譯結果 (Pub)"| Redis
+    Redis -->|"翻譯結果 (Sub)"| Node
+    Node -->|WebSocket| Client["Web Client (Browser)"]
 ```
 
 1.  **Node.js Server**: 負責抓取直播流，將音訊切片發送至 Redis，並作為 WebSocket 伺服器向前端廣播翻譯結果。
