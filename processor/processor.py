@@ -1,13 +1,14 @@
 import sys
 import json
 import time
+import asyncio
 from datetime import datetime, timezone, timedelta
 import numpy as np
-import redis
+import redis.asyncio as aioredis  # 🎯 異步 Redis
 import os
 import base64
 import re
-from concurrent.futures import ThreadPoolExecutor
+import aiohttp  # 🎯 異步 HTTP
 from collections import deque
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -90,10 +91,81 @@ pending_text = ""             # 🎯 新增：待處理的不完整文字
 last_publish_time = 0
 recent_texts = deque(maxlen=10)
 context_history = deque(maxlen=8)  # 🎯 增加上下文長度
-executor = ThreadPoolExecutor(max_workers=2)
+
+# 🎯 異步 HTTP session (全域)
+aio_session: aiohttp.ClientSession = None
 
 MIN_PUBLISH_INTERVAL = 0.8    # 🎯 縮短最小間隔
 SIMILARITY_THRESHOLD = 0.7    # 🎯 提高相似度閾值
+
+# 🎯 OpenCC 簡繁轉換器 (s2twp = 簡體→繁體台灣，包含詞彙轉換)
+try:
+    import opencc
+    OPENCC_CONVERTER = opencc.OpenCC('s2twp')  # 簡體→繁體(台灣正體+台灣慣用詞)
+    print(f"✅ OpenCC 簡繁轉換器已載入 (s2twp)", file=sys.stderr, flush=True)
+except ImportError:
+    OPENCC_CONVERTER = None
+    print(f"⚠️ OpenCC 未安裝，將使用備用 txt 字典", file=sys.stderr, flush=True)
+
+# 🎯 載入備用簡繁轉換表 (當 OpenCC 不可用時)
+def load_simplified_to_traditional() -> dict:
+    """從外部 txt 檔案載入簡繁轉換表（備用）"""
+    mapping = {}
+    txt_path = os.path.join(os.path.dirname(__file__), 'simplified_to_traditional.txt')
+    
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # 跳過空行和註解
+                if not line or line.startswith('#'):
+                    continue
+                # 解析 簡體=繁體 格式
+                if '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        simp, trad = parts[0].strip(), parts[1].strip()
+                        if simp and trad:
+                            mapping[simp] = trad
+        if not OPENCC_CONVERTER:
+            print(f"✅ 載入備用簡繁轉換表: {len(mapping)} 組", file=sys.stderr, flush=True)
+    except FileNotFoundError:
+        if not OPENCC_CONVERTER:
+            print(f"⚠️ 找不到簡繁轉換表: {txt_path}", file=sys.stderr, flush=True)
+    except Exception as e:
+        if not OPENCC_CONVERTER:
+            print(f"⚠️ 載入簡繁轉換表失敗: {e}", file=sys.stderr, flush=True)
+    
+    return mapping
+
+def load_china_to_taiwan() -> dict:
+    """從外部 txt 檔案載入中國用語轉台灣用語表"""
+    mapping = {}
+    txt_path = os.path.join(os.path.dirname(__file__), 'china_to_taiwan.txt')
+    
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        china, taiwan = parts[0].strip(), parts[1].strip()
+                        if china and taiwan:
+                            mapping[china] = taiwan
+        print(f"✅ 載入中台用語表: {len(mapping)} 組", file=sys.stderr, flush=True)
+    except FileNotFoundError:
+        print(f"⚠️ 找不到中台用語表: {txt_path}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"⚠️ 載入中台用語表失敗: {e}", file=sys.stderr, flush=True)
+    
+    return mapping
+
+# 全域轉換表
+SIMPLIFIED_TO_TRADITIONAL = load_simplified_to_traditional()
+CHINA_TO_TAIWAN = load_china_to_taiwan()
 
 def init_global_resources():
     global asr_model, DEVICE, COMPUTE_TYPE
@@ -271,70 +343,244 @@ def whisper_asr(audio_array: np.ndarray) -> str:
         traceback.print_exc()
         return ""
 
-def llm_translate(text: str) -> str:
-    """使用 Ollama Qwen2 LLM 進行日文到繁體中文翻譯"""
+async def llm_translate(text: str) -> str:
+    """🎯 異步版：使用 Ollama Qwen2 LLM 進行日文到繁體中文翻譯"""
+    global aio_session
+    
     if not text:
         return ""
     
-    # 🎯 構建翻譯 prompt
-    prompt = f"""你是專業的日文翻譯員。請將以下日文直播對話翻譯成自然流暢的繁體中文。
-
+    # 🎯 優化的翻譯 prompt - 使用 ChatML 格式
+    prompt = f"""<|im_start|>system
+你是專業的日文即時翻譯員。將日文遊戲直播對話翻譯成自然的繁體中文。
 規則：
-1. 只輸出翻譯結果，不要加任何解釋或標點說明
-2. 保持口語化、自然的語氣
-3. 保留專有名詞的原文或常用譯法
-4. 如果是語氣詞或感嘆詞，翻譯成對應的中文表達
-
-日文原文：{text}
-
-繁體中文翻譯："""
+- 只輸出翻譯結果
+- 使用繁體中文（台灣用語）
+- 保持口語化自然語氣
+- 遊戲術語保留原文或常用譯法
+<|im_end|>
+<|im_start|>user
+{text}
+<|im_end|>
+<|im_start|>assistant
+"""
     
     try:
-        response = requests.post(
+        async with aio_session.post(
             LLM_API_URL,
             json={
                 "model": LLM_MODEL,
                 "prompt": prompt,
                 "stream": False,
+                "raw": True,
                 "options": {
-                    "temperature": 0.3,      # 低溫度確保翻譯穩定
+                    "temperature": 0.2,
                     "top_p": 0.9,
-                    "num_predict": 256,      # 限制輸出長度
-                    "stop": ["\n\n", "日文原文", "規則"]  # 停止標記
+                    "num_predict": 200,
+                    "stop": ["<|im_end|>", "<|im_start|>", "\n\n", "日文原文"]
                 }
             },
-            timeout=LLM_TIMEOUT
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            translated = result.get('response', '').strip()
-            
-            # 🎯 清理 LLM 輸出
-            # 移除可能的前綴
-            prefixes_to_remove = ['翻譯：', '翻譯:', '中文：', '中文:']
-            for prefix in prefixes_to_remove:
-                if translated.startswith(prefix):
-                    translated = translated[len(prefix):].strip()
-            
-            # 🎯 過濾翻譯後的重複內容
-            if translated:
-                translated = filter_translated_repetition(translated)
-            
-            return translated
-        else:
-            print(f"LLM 翻譯失敗: HTTP {response.status_code}", file=sys.stderr, flush=True)
-            return ""
-            
-    except requests.exceptions.Timeout:
+            timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT)
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                translated = result.get('response', '').strip()
+                
+                # 🎯 清理 LLM 輸出
+                translated = clean_llm_output(translated)
+                
+                # 🎯 過濾翻譯後的重複內容
+                if translated:
+                    translated = filter_translated_repetition(translated)
+                
+                return translated
+            else:
+                print(f"LLM 翻譯失敗: HTTP {response.status}", file=sys.stderr, flush=True)
+                return ""
+                
+    except asyncio.TimeoutError:
         print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
         return ""
-    except requests.exceptions.ConnectionError:
-        print(f"無法連接 LLM 服務", file=sys.stderr, flush=True)
+    except aiohttp.ClientError as e:
+        print(f"無法連接 LLM 服務: {e}", file=sys.stderr, flush=True)
         return ""
     except Exception as e:
         print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
         return ""
+
+def clean_llm_output(text: str) -> str:
+    """清理 LLM 輸出的各種問題"""
+    if not text:
+        return ""
+    
+    # 🎯 偵測並過濾異常輸出
+    # 1. 羅馬拼音（日文未翻譯）- 連續的小寫字母+空格
+    romaji_pattern = re.compile(r'^[a-z\s\-\']+$', re.IGNORECASE)
+    if romaji_pattern.match(text.strip()) and len(text) > 10:
+        print(f"⚠️ 過濾羅馬拼音: {text[:40]}", file=sys.stderr, flush=True)
+        return ""
+    
+    # 2. 混合語言偵測（俄文、日文假名在中文句子中）
+    # 俄文字母
+    if re.search(r'[а-яА-ЯёЁ]', text):
+        text = re.sub(r'[а-яА-ЯёЁ]+', '', text)
+        print(f"⚠️ 移除俄文字符", file=sys.stderr, flush=True)
+    
+    # 3. 如果句子大部分是日文假名（未翻譯），直接過濾
+    hiragana_katakana = len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF]', text))
+    chinese_chars = len(re.findall(r'[\u4E00-\u9FFF]', text))
+    if hiragana_katakana > chinese_chars and hiragana_katakana > 5:
+        print(f"⚠️ 過濾未翻譯日文: {text[:40]}", file=sys.stderr, flush=True)
+        return ""
+    
+    # 4. 過濾異常的英文/符號混合（如 apol_gad, spleen nenesko）
+    if re.match(r'^[a-zA-Z_\s]+$', text.strip()) and len(text) > 5:
+        print(f"⚠️ 過濾純英文: {text[:40]}", file=sys.stderr, flush=True)
+        return ""
+    
+    # 移除常見前綴
+    prefixes = ['翻譯：', '翻譯:', '中文：', '中文:', '答：', '答:', 
+                '繁體中文：', '繁體中文:', '譯文：', '譯文:', '回答：', '回答:']
+    for prefix in prefixes:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    
+    # 移除引號包裹
+    if len(text) >= 2:
+        if (text[0] == '"' and text[-1] == '"') or \
+           (text[0] == '「' and text[-1] == '」') or \
+           (text[0] == '『' and text[-1] == '』') or \
+           (text[0] == "'" and text[-1] == "'"):
+            text = text[1:-1].strip()
+    
+    # 🎯 移除奇怪的符號組合
+    # 移除 ,} )} :)> !"); 等
+    text = re.sub(r'[,\s]*[}\]]\s*', '', text)
+    text = re.sub(r'[:\s]*[)\]>]+\s*[?\s]*$', '', text)
+    text = re.sub(r'^[,\s]*[{\[]\s*', '', text)
+    text = re.sub(r'[!?]*["\';)]+\s*$', '', text)  # 移除結尾的 !"); 等
+    text = re.sub(r'["\';(]+\s*[!?]*\s*$', '', text)  # 移除結尾引號括號
+    text = re.sub(r'\s*[!]{2,}["\');\s]*$', '', text)  # 移除 !!"); 等
+    text = re.sub(r'的["\'\s.。，,]+$', '的', text)  # 修正「的".」等結尾
+    text = re.sub(r'你這[.\s]*$', '你這傢伙', text)  # 補完不完整句子
+    text = re.sub(r'[.\s]+$', '', text)  # 移除結尾多餘的點和空格
+    
+    # 移除開頭結尾的特殊符號
+    text = re.sub(r'^[-=_*#]+\s*', '', text)
+    text = re.sub(r'\s*[-=_*#]+$', '', text)
+    
+    # 移除 markdown 格式
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    
+    # 🎯 移除句中異常的英文片段（保留常見遊戲術語）
+    # 允許的英文：K, KO, Combo, Gauge, Guard, Attack, Win 等
+    allowed_english = ['K', 'KO', 'OK', 'Combo', 'Gauge', 'Guard', 'Attack', 'Win', 
+                       'Lose', 'HP', 'MP', 'SP', 'BGM', 'NG', 'GG', 'VS', 'DLC',
+                       'Online', 'Offline', 'S', 'A', 'B', 'C', 'D']
+    
+    def clean_english(match):
+        word = match.group(0)
+        # 保留允許的英文和短英文
+        if word.upper() in [w.upper() for w in allowed_english] or len(word) <= 2:
+            return word
+        # 移除長的異常英文
+        return ''
+    
+    text = re.sub(r'\b[a-zA-Z_]{4,}\b', clean_english, text)
+    
+    # 🎯 在轉換前先清理連續重複（如：這代碼不錯這代碼不錯）
+    text = remove_inline_repetition(text)
+    
+    # 🎯 簡體轉繁體 - 優先使用 OpenCC
+    if OPENCC_CONVERTER:
+        try:
+            text = OPENCC_CONVERTER.convert(text)
+        except Exception as e:
+            print(f"⚠️ OpenCC 轉換失敗: {e}", file=sys.stderr, flush=True)
+            # fallback 到 txt 字典
+            sorted_mappings = sorted(SIMPLIFIED_TO_TRADITIONAL.items(), key=lambda x: len(x[0]), reverse=True)
+            for simp, trad in sorted_mappings:
+                text = text.replace(simp, trad)
+    else:
+        # 使用備用 txt 字典
+        sorted_mappings = sorted(SIMPLIFIED_TO_TRADITIONAL.items(), key=lambda x: len(x[0]), reverse=True)
+        for simp, trad in sorted_mappings:
+            text = text.replace(simp, trad)
+    
+    # 🎯 中國用語 → 台灣用語 - 額外補充 (OpenCC s2twp 已包含大部分)
+    for china, taiwan in CHINA_TO_TAIWAN.items():
+        text = text.replace(china, taiwan)
+    
+    # 移除多餘空格
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+def remove_inline_repetition(text: str) -> str:
+    """移除句中連續重複的片段（如：這代碼不錯這代碼不錯）"""
+    if not text or len(text) < 8:
+        return text
+    
+    original = text
+    
+    # 🎯 方法 1: 偵測完全相同的連續重複
+    # 從長到短嘗試找重複模式
+    for pattern_len in range(min(25, len(text) // 2), 3, -1):
+        for start in range(len(text) - pattern_len * 2 + 1):
+            pattern = text[start:start + pattern_len]
+            
+            # 跳過純標點或空白
+            if all(c in '，。！？、 ～~' for c in pattern):
+                continue
+            
+            # 檢查是否連續重複
+            repeat_pos = start + pattern_len
+            if text[repeat_pos:repeat_pos + pattern_len] == pattern:
+                # 找到重複！計算重複次數
+                count = 2
+                check_pos = repeat_pos + pattern_len
+                while text[check_pos:check_pos + pattern_len] == pattern:
+                    count += 1
+                    check_pos += pattern_len
+                
+                # 重建文字：前綴 + 一次 pattern + 後綴
+                prefix = text[:start]
+                suffix = text[start + pattern_len * count:]
+                result = (prefix + pattern + suffix).strip()
+                
+                if result != original:
+                    print(f"🔧 移除行內重複: {original[:40]} -> {result[:40]}", file=sys.stderr, flush=True)
+                    # 遞迴處理可能的多重重複
+                    return remove_inline_repetition(result)
+    
+    # 🎯 方法 2: 偵測「為什麼...為什麼...為什麼」這種非連續重複
+    # 找出重複出現 3 次以上的短語
+    for phrase_len in range(3, min(15, len(text) // 3)):
+        for start in range(len(text) - phrase_len):
+            phrase = text[start:start + phrase_len]
+            if all(c in '，。！？、 ～~' for c in phrase):
+                continue
+            
+            count = text.count(phrase)
+            if count >= 3:
+                # 只保留第一次出現
+                first_idx = text.find(phrase)
+                # 移除後續重複
+                result = text[:first_idx + phrase_len]
+                remaining = text[first_idx + phrase_len:]
+                remaining = remaining.replace(phrase, '')
+                result = (result + remaining).strip()
+                
+                # 清理多餘標點
+                result = re.sub(r'[，。！？]{2,}', '。', result)
+                
+                if result != original and len(result) >= 4:
+                    print(f"🔧 移除散落重複: {original[:40]} -> {result[:40]}", file=sys.stderr, flush=True)
+                    return result
+    
+    return text
 
 def filter_translated_repetition(text: str) -> str:
     """過濾翻譯後的重複內容 - 加強版"""
@@ -342,6 +588,11 @@ def filter_translated_repetition(text: str) -> str:
         return text
     
     original_text = text
+    
+    # 🎯 先用 remove_inline_repetition 處理
+    text = remove_inline_repetition(text)
+    if text != original_text:
+        original_text = text
     
     # 🎯 方法 0: 偵測空格分隔的完全相同片段 (如：不在乎的基德先生 不在乎的基德先生)
     if ' ' in text:
@@ -834,8 +1085,8 @@ def merge_incomplete_sentence(pending: str, new_text: str) -> tuple:
 # 核心處理函數
 # ----------------------------------------------------
 
-def process_audio_chunk(audio_data_b64: str, r):
-    """處理音訊塊，使用滑動視窗機制"""
+async def process_audio_chunk(audio_data_b64: str, r):
+    """🎯 異步版：處理音訊塊，使用滑動視窗機制"""
     global audio_buffer, overlap_buffer, last_transcription, last_publish_time
     global recent_texts, pending_text, last_full_sentence
     
@@ -862,8 +1113,9 @@ def process_audio_chunk(audio_data_b64: str, r):
     # 轉換為 numpy array
     audio_array = np.frombuffer(audio_to_process, dtype=np.int16).astype(np.float32) / 32768.0
     
-    # ASR 轉錄
-    text = whisper_asr(audio_array)
+    # ASR 轉錄 (在線程池中執行，避免阻塞 event loop)
+    loop = asyncio.get_event_loop()
+    text = await loop.run_in_executor(None, whisper_asr, audio_array)
     text = filter_text(text)
     
     if not text:
@@ -904,8 +1156,8 @@ def process_audio_chunk(audio_data_b64: str, r):
     recent_texts.append(complete_sentence)
     context_history.append(complete_sentence)
     
-    # 🎯 LLM 翻譯
-    translation = executor.submit(llm_translate, complete_sentence).result(timeout=LLM_TIMEOUT + 2)
+    # 🎯 異步 LLM 翻譯
+    translation = await llm_translate(complete_sentence)
     
     # 發布結果
     tz = timezone(timedelta(hours=8))
@@ -919,31 +1171,51 @@ def process_audio_chunk(audio_data_b64: str, r):
     }
     
     try:
-        r.publish(TRANSLATION_CHANNEL, json.dumps(result, ensure_ascii=False))
+        await r.publish(TRANSLATION_CHANNEL, json.dumps(result, ensure_ascii=False))
     except Exception as e:
         print(f"發佈錯誤: {e}", file=sys.stderr, flush=True)
 
-def main():
-    """主循環。"""
+async def main():
+    """🎯 異步主循環"""
+    global aio_session
+    
     init_global_resources()
-
+    
+    # 🎯 建立異步 HTTP session
+    aio_session = aiohttp.ClientSession()
+    
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-        r.ping()
-        print(f"✅ Redis 連線成功", file=sys.stderr, flush=True)
+        # 🎯 使用異步 Redis
+        r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+        await r.ping()
+        print(f"✅ Redis 連線成功 (異步模式)", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"❌ Redis 連線失敗: {e}", file=sys.stderr, flush=True)
+        await aio_session.close()
         sys.exit(1)
 
     p = r.pubsub()
-    p.subscribe(AUDIO_CHANNEL)
+    await p.subscribe(AUDIO_CHANNEL)
     print(f"✅ 已訂閱: {AUDIO_CHANNEL}", file=sys.stderr, flush=True)
-    print(f"🎯 stable-ts 整合模式已啟用", file=sys.stderr, flush=True)
+    print(f"🎯 stable-ts 整合模式已啟用 (異步)", file=sys.stderr, flush=True)
     print(f"🎯 VAD: {USE_VAD}, 靜音抑制: {SUPPRESS_SILENCE}", file=sys.stderr, flush=True)
 
-    for msg in p.listen():
-        if msg['type'] == 'message':
-            process_audio_chunk(msg['data'].decode('utf-8'), r)
+    try:
+        # 🎯 異步讀取訊息
+        async for msg in p.listen():
+            if msg['type'] == 'message':
+                data = msg['data']
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8')
+                await process_audio_chunk(data, r)
+    except asyncio.CancelledError:
+        print(f"🛑 收到取消信號", file=sys.stderr, flush=True)
+    finally:
+        # 🎯 清理資源
+        await p.unsubscribe(AUDIO_CHANNEL)
+        await r.close()
+        await aio_session.close()
+        print(f"✅ 資源已清理", file=sys.stderr, flush=True)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
