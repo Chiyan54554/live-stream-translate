@@ -1,0 +1,22 @@
+# Dockerfile for Ollama LLM Service with pre-downloaded model
+FROM ollama/ollama:latest
+
+# 設定環境變數
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_MODELS=/root/.ollama/models
+
+# 建立模型目錄
+RUN mkdir -p /root/.ollama/models
+
+# 🎯 在建構時下載模型
+# 啟動 Ollama 服務，下載模型，然後停止
+RUN ollama serve & \
+    sleep 5 && \
+    ollama pull qwen2.5:7b-instruct && \
+    pkill ollama
+
+# 暴露 Ollama API 端口
+EXPOSE 11434
+
+# 啟動 Ollama 服務
+CMD ["serve"]

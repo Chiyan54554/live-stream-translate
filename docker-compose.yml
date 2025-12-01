@@ -17,7 +17,43 @@ services:
     
     restart: always
 
-  # 2. Python Processor Service (Redis Subscriber/Publisher)
+  # 🌟 2. Ollama LLM Service (翻譯引擎)
+  ollama:
+    build:
+      context: .
+      dockerfile: ollama/Dockerfile.ollama
+    container_name: ollama_llm
+    expose:
+      - "11434"
+    
+    # 配置 GPU 支持 (Ollama 也需要 GPU)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      NVIDIA_VISIBLE_DEVICES: all
+    
+    # 持久化模型，避免重複下載
+    volumes:
+      - ollama_models:/root/.ollama
+    
+    # 健康檢查 (使用 wget 或 ollama 命令)
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    
+    restart: always
+
+  # 3. Python Processor Service (Redis Subscriber/Publisher)
   processor:
     build:
       context: .
@@ -33,7 +69,6 @@ services:
               count: all
               capabilities: [gpu]
     
-    # 🌟 新增：設定 NVIDIA 環境變數
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
@@ -44,13 +79,24 @@ services:
       # 🌟 NVIDIA 相關環境變數
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      # 🌟 LLM 翻譯配置 (連接 Docker 內的 Ollama 服務)
+      LLM_HOST: ollama
+      LLM_PORT: "11434"
+      LLM_MODEL: "qwen2.5:7b-instruct"
     
     volumes:
       - huggingface_cache:/root/.cache/huggingface
+    
+    # 等待 Ollama 服務就緒
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
 
     restart: always
       
-  # 3. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
+  # 4. Node.js Server Service (FFmpeg, Redis I/O, WebSocket)
   server:
     build:
       context: .
@@ -71,4 +117,6 @@ services:
 
 volumes:
   huggingface_cache:
+    driver: local
+  ollama_models:
     driver: local

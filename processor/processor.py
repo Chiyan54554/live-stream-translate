@@ -33,7 +33,7 @@ try:
     
     # 🎯 使用 stable-ts 整合 faster-whisper
     import stable_whisper
-    from deep_translator import GoogleTranslator
+    import requests  # 🎯 用於呼叫 Ollama LLM API
     
     print(f"✅ stable-ts 版本: {stable_whisper.__version__}", file=sys.stderr, flush=True)
     
@@ -64,6 +64,13 @@ MODEL_CACHE_DIR = os.getenv('MODEL_CACHE_DIR', '/root/.cache/huggingface/hub')
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 
+# 🎯 LLM 翻譯配置 (Ollama + Qwen2)
+LLM_HOST = os.getenv('LLM_HOST', 'ollama')  # Docker 服務名稱
+LLM_PORT = os.getenv('LLM_PORT', '11434')
+LLM_MODEL = os.getenv('LLM_MODEL', 'qwen2.5:7b-instruct')  # Qwen2.5 7B Instruct
+LLM_API_URL = f"http://{LLM_HOST}:{LLM_PORT}/api/generate"
+LLM_TIMEOUT = 10  # 翻譯超時秒數
+
 # 🎯 stable-ts 與 VAD 相關設定
 USE_STABLE_TS = True                    # 啟用 stable-ts
 USE_VAD = True                          # 啟用 Silero VAD
@@ -75,7 +82,6 @@ MAX_INSTANT_WORDS = 0.35                # 🎯 降低閾值，更積極過濾幻
 ONLY_VOICE_FREQ = False                 # 是否只保留語音頻率 (200-5000 Hz)
 
 asr_model = None
-translator = None
 audio_buffer = b''
 overlap_buffer = b''         # 🎯 恢復重疊緩衝區
 last_transcription = ""
@@ -90,20 +96,31 @@ MIN_PUBLISH_INTERVAL = 0.8    # 🎯 縮短最小間隔
 SIMILARITY_THRESHOLD = 0.7    # 🎯 提高相似度閾值
 
 def init_global_resources():
-    global asr_model, translator, DEVICE, COMPUTE_TYPE
+    global asr_model, DEVICE, COMPUTE_TYPE
     
     print(f"="*50, file=sys.stderr, flush=True)
     print(f"🎯 設備: {DEVICE}, 計算類型: {COMPUTE_TYPE}", file=sys.stderr, flush=True)
-    print(f"🎯 模型: {ASR_MODEL_NAME}", file=sys.stderr, flush=True)
+    print(f"🎯 ASR 模型: {ASR_MODEL_NAME}", file=sys.stderr, flush=True)
+    print(f"🎯 LLM 翻譯: {LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}", file=sys.stderr, flush=True)
     print(f"🎯 stable-ts: {USE_STABLE_TS}, VAD: {USE_VAD}", file=sys.stderr, flush=True)
     print(f"="*50, file=sys.stderr, flush=True)
 
+    # 🎯 測試 Ollama LLM 連線
     try:
-        translator = GoogleTranslator(source=SOURCE_LANG_CODE, target=TARGET_LANG_CODE)
-        print("✅ 翻譯引擎就緒", file=sys.stderr, flush=True)
+        test_resp = requests.post(
+            LLM_API_URL,
+            json={"model": LLM_MODEL, "prompt": "test", "stream": False},
+            timeout=30
+        )
+        if test_resp.status_code == 200:
+            print(f"✅ LLM 翻譯引擎就緒 ({LLM_MODEL})", file=sys.stderr, flush=True)
+        else:
+            print(f"⚠️ LLM 回應異常: {test_resp.status_code}", file=sys.stderr, flush=True)
+    except requests.exceptions.ConnectionError:
+        print(f"⚠️ 無法連接 Ollama ({LLM_API_URL})，翻譯功能可能無法使用", file=sys.stderr, flush=True)
+        print(f"   請確保 Ollama 正在運行: ollama serve", file=sys.stderr, flush=True)
     except Exception as e:
-        print(f"❌ 翻譯引擎失敗: {e}", file=sys.stderr, flush=True)
-        sys.exit(1)
+        print(f"⚠️ LLM 測試失敗: {e}", file=sys.stderr, flush=True)
 
     def try_load_model(device, compute_type):
         try:
@@ -254,20 +271,69 @@ def whisper_asr(audio_array: np.ndarray) -> str:
         traceback.print_exc()
         return ""
 
-def google_mt(text: str) -> str:
-    """使用 Deep Translator 進行翻譯，並過濾重複。"""
-    if not text or not translator:
+def llm_translate(text: str) -> str:
+    """使用 Ollama Qwen2 LLM 進行日文到繁體中文翻譯"""
+    if not text:
         return ""
+    
+    # 🎯 構建翻譯 prompt
+    prompt = f"""你是專業的日文翻譯員。請將以下日文直播對話翻譯成自然流暢的繁體中文。
+
+規則：
+1. 只輸出翻譯結果，不要加任何解釋或標點說明
+2. 保持口語化、自然的語氣
+3. 保留專有名詞的原文或常用譯法
+4. 如果是語氣詞或感嘆詞，翻譯成對應的中文表達
+
+日文原文：{text}
+
+繁體中文翻譯："""
+    
     try:
-        translated = translator.translate(text)
+        response = requests.post(
+            LLM_API_URL,
+            json={
+                "model": LLM_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.3,      # 低溫度確保翻譯穩定
+                    "top_p": 0.9,
+                    "num_predict": 256,      # 限制輸出長度
+                    "stop": ["\n\n", "日文原文", "規則"]  # 停止標記
+                }
+            },
+            timeout=LLM_TIMEOUT
+        )
         
-        # 🎯 過濾翻譯後的重複內容
-        if translated:
-            translated = filter_translated_repetition(translated)
-        
-        return translated
+        if response.status_code == 200:
+            result = response.json()
+            translated = result.get('response', '').strip()
+            
+            # 🎯 清理 LLM 輸出
+            # 移除可能的前綴
+            prefixes_to_remove = ['翻譯：', '翻譯:', '中文：', '中文:']
+            for prefix in prefixes_to_remove:
+                if translated.startswith(prefix):
+                    translated = translated[len(prefix):].strip()
+            
+            # 🎯 過濾翻譯後的重複內容
+            if translated:
+                translated = filter_translated_repetition(translated)
+            
+            return translated
+        else:
+            print(f"LLM 翻譯失敗: HTTP {response.status_code}", file=sys.stderr, flush=True)
+            return ""
+            
+    except requests.exceptions.Timeout:
+        print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
+        return ""
+    except requests.exceptions.ConnectionError:
+        print(f"無法連接 LLM 服務", file=sys.stderr, flush=True)
+        return ""
     except Exception as e:
-        print(f"翻譯錯誤: {e}", file=sys.stderr, flush=True)
+        print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
         return ""
 
 def filter_translated_repetition(text: str) -> str:
@@ -838,8 +904,8 @@ def process_audio_chunk(audio_data_b64: str, r):
     recent_texts.append(complete_sentence)
     context_history.append(complete_sentence)
     
-    # 翻譯
-    translation = executor.submit(google_mt, complete_sentence).result(timeout=5)
+    # 🎯 LLM 翻譯
+    translation = executor.submit(llm_translate, complete_sentence).result(timeout=LLM_TIMEOUT + 2)
     
     # 發布結果
     tz = timezone(timedelta(hours=8))

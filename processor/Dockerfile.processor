@@ -34,12 +34,12 @@ RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])
     mkdir -p /usr/local/lib/ctranslate2 && \
     ln -sf $CUDNN_PATH/libcudnn*.so* /usr/local/lib/ctranslate2/
 
-# 安裝其他依賴
+# 安裝其他依賴 (使用 requests 連接 Ollama LLM，移除 deep-translator)
 RUN pip install --no-cache-dir \
     ctranslate2>=4.5.0 \
     faster-whisper>=1.1.0 \
     stable-ts>=2.18.0 \
-    deep-translator>=1.11.4 \
+    requests>=2.31.0 \
     redis>=5.0.0 \
     numpy>=1.24.0
 
