@@ -58,8 +58,8 @@ SOURCE_LANG_CODE = "ja"
 TARGET_LANG_CODE = "zh-TW"
 
 # 🎯 準確率優化：平衡緩衝與延遲
-BUFFER_DURATION_S = 4.0       # 🎯 4 秒緩衝，平衡準確度與延遲
-OVERLAP_DURATION_S = 0.8      # 🎯 適度重疊確保連貫性
+BUFFER_DURATION_S = 2.0       # 🎯 2 秒緩衝，目標 3 秒延遲
+OVERLAP_DURATION_S = 0.3      # 🎯 最小重疊
 MIN_AUDIO_ENERGY = 0.006      # 🎯 適中的能量門檻
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
@@ -86,16 +86,16 @@ LLM_HOST = os.getenv('LLM_HOST', 'ollama')  # Docker 服務名稱
 LLM_PORT = os.getenv('LLM_PORT', '11434')
 LLM_MODEL = os.getenv('LLM_MODEL', 'qwen2.5:7b-instruct')  # Qwen2.5 7B Instruct
 LLM_API_URL = f"http://{LLM_HOST}:{LLM_PORT}/api/generate"
-LLM_TIMEOUT = 10  # 翻譯超時秒數
+LLM_TIMEOUT = 8  # 🎯 翻譯超時秒數（縮短加快響應）
 
 # 🎯 stable-ts 與 VAD 相關設定
 USE_STABLE_TS = True                    # 啟用 stable-ts
 USE_VAD = True                          # 啟用 Silero VAD
-VAD_THRESHOLD = 0.35                    # VAD 語音偵測閾值
+VAD_THRESHOLD = 0.45                    # 🎯 VAD 語音偵測閾值（提高以減少過度切割）
 SUPPRESS_SILENCE = True                 # 靜音抑制
-HALLUCINATION_SILENCE_TH = 2.0          # 🎯 幻覺靜音閾值（秒）
-AVG_PROB_THRESHOLD = -0.8               # 平均置信度閾值
-MAX_INSTANT_WORDS = 0.35                # 🎯 降低閾值，更積極過濾幻覺
+HALLUCINATION_SILENCE_TH = 1.5          # 🎯 幻覺靜音閾值（秒）- 降低更積極過濾
+AVG_PROB_THRESHOLD = -0.7               # 🎯 平均置信度閾值 - 稍微提高過濾低品質
+MAX_INSTANT_WORDS = 0.30                # 🎯 降低閾值，更積極過濾幻覺
 ONLY_VOICE_FREQ = False                 # 是否只保留語音頻率 (200-5000 Hz)
 
 asr_model = None
@@ -106,13 +106,13 @@ last_full_sentence = ""       # 🎯 新增：記錄上一個完整句子
 pending_text = ""             # 🎯 新增：待處理的不完整文字
 last_publish_time = 0
 recent_texts = deque(maxlen=10)
-context_history = deque(maxlen=8)  # 🎯 增加上下文長度
+context_history = deque(maxlen=5)  # 🎯 縮短上下文減少開銷
 
 # 🎯 異步 HTTP session (全域)
 aio_session: aiohttp.ClientSession = None
 
-MIN_PUBLISH_INTERVAL = 0.8    # 🎯 縮短最小間隔
-SIMILARITY_THRESHOLD = 0.7    # 🎯 提高相似度閾值
+MIN_PUBLISH_INTERVAL = 0.5    # 🎯 縮短最小間隔加快輸出
+SIMILARITY_THRESHOLD = 0.75   # 🎯 提高相似度閾值減少重複處理
 
 # 🎯 OpenCC 簡繁轉換器 (s2twp = 簡體→繁體台灣，包含詞彙轉換)
 try:
@@ -330,7 +330,7 @@ def whisper_asr(audio_array: np.ndarray) -> str:
             
             result = asr_model(
                 audio_input,
-                chunk_length_s=15,
+                chunk_length_s=10,            # 🎯 縮短 chunk 加快處理
                 return_timestamps=True,
                 generate_kwargs={"language": "ja", "task": "transcribe"},
                 ignore_warning=True,  # 🎯 隱藏 chunk_length_s 實驗性警告
@@ -434,12 +434,18 @@ async def llm_translate(text: str) -> str:
     
     # 🎯 優化的翻譯 prompt - 使用 ChatML 格式
     prompt = f"""<|im_start|>system
-你是專業的日文即時翻譯員。將日文遊戲直播對話翻譯成自然的繁體中文。
-規則：
-- 只輸出翻譯結果
-- 使用繁體中文（台灣用語）
-- 保持口語化自然語氣
-- 遊戲術語保留原文或常用譯法
+你是專業的日文即時直播翻譯員。將日文遊戲直播對話翻譯成自然流暢的繁體中文。
+
+重要規則：
+- 只輸出翻譯結果，不要解釋或加註
+- 使用繁體中文和台灣慣用語
+- 保持口語化、自然的對話語氣
+- 如果輸入是不完整片段或單字，翻譯其最可能的意思
+- 如果輸入無法辨識或沒有意義，回覆空白
+- 人名保留日文發音的音譯（如：ゆうき→優希）
+- 遊戲術語使用台灣玩家常用譯法
+- 不要重複翻譯同樣的內容
+- 不要自行添加原文沒有的內容
 <|im_end|>
 <|im_start|>user
 {text}
@@ -456,9 +462,9 @@ async def llm_translate(text: str) -> str:
                 "stream": False,
                 "raw": True,
                 "options": {
-                    "temperature": 0.2,
-                    "top_p": 0.9,
-                    "num_predict": 200,
+                    "temperature": 0.1,       # 🎯 降低溫度加快生成
+                    "top_p": 0.85,            # 🎯 稍微收緊
+                    "num_predict": 150,       # 🎯 縮短最大輸出
                     "stop": ["<|im_end|>", "<|im_start|>", "\n\n", "日文原文"]
                 }
             },
