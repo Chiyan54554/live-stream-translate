@@ -38,12 +38,16 @@ RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])
 RUN pip install --no-cache-dir \
     ctranslate2>=4.5.0 \
     faster-whisper>=1.1.0 \
-    stable-ts>=2.18.0 \
+    stable-ts>=2.16.0 \
     requests>=2.31.0 \
     aiohttp>=3.9.0 \
     redis>=5.0.0 \
     numpy>=1.24.0 \
-    opencc-python-reimplemented>=0.1.7
+    opencc-python-reimplemented>=0.1.7 \
+    # 🎯 Kotoba-Whisper v2.1 支援 (Transformers Pipeline)
+    transformers>=4.39.0 \
+    accelerate>=0.20.0 \
+    punctuators==0.0.5
 
 # 複製程式碼和資源檔案
 COPY processor/processor.py .

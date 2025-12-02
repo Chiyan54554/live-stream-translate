@@ -38,6 +38,15 @@ try:
     
     print(f"✅ stable-ts 版本: {stable_whisper.__version__}", file=sys.stderr, flush=True)
     
+    # 🎯 嘗試載入 Transformers pipeline (用於 kotoba-whisper-v2.1)
+    TRANSFORMERS_AVAILABLE = False
+    try:
+        from transformers import pipeline as hf_pipeline
+        TRANSFORMERS_AVAILABLE = True
+        print("✅ Transformers pipeline 可用", file=sys.stderr, flush=True)
+    except ImportError:
+        print("⚠️ Transformers 未安裝，將使用 faster-whisper", file=sys.stderr, flush=True)
+    
 except ImportError as e:
     print(f"錯誤：{e}", file=sys.stderr, flush=True)
     sys.exit(1)
@@ -58,9 +67,16 @@ REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 AUDIO_CHANNEL = "audio_feed"
 TRANSLATION_CHANNEL = "translation_feed"
 
-# 🎯 使用 large-v3-turbo：更新的模型，幻覺更少
-ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'large-v3-turbo')
+# 🎯 ASR 模型選擇
+# - large-v3: 標準 faster-whisper 穩定版
+# - kotoba-tech/kotoba-whisper-v2.1: 日文優化 Transformers 版 (幻覺更少，帶標點)
+# - kotoba-tech/kotoba-whisper-v2.0-faster: 日文優化 CTranslate2 版 (RTX 50 系列可能不相容)
+ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'kotoba-tech/kotoba-whisper-v2.1')
 MODEL_CACHE_DIR = os.getenv('MODEL_CACHE_DIR', '/root/.cache/huggingface/hub')
+
+# 🎯 自動判斷模型類型
+USE_KOTOBA_PIPELINE = 'kotoba-whisper-v2.1' in ASR_MODEL_NAME
+USING_KOTOBA_PIPELINE = False  # 🎯 實際使用的模式 (由 init_global_resources 設定)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
@@ -168,11 +184,12 @@ SIMPLIFIED_TO_TRADITIONAL = load_simplified_to_traditional()
 CHINA_TO_TAIWAN = load_china_to_taiwan()
 
 def init_global_resources():
-    global asr_model, DEVICE, COMPUTE_TYPE
+    global asr_model, DEVICE, COMPUTE_TYPE, USING_KOTOBA_PIPELINE
     
     print(f"="*50, file=sys.stderr, flush=True)
     print(f"🎯 設備: {DEVICE}, 計算類型: {COMPUTE_TYPE}", file=sys.stderr, flush=True)
     print(f"🎯 ASR 模型: {ASR_MODEL_NAME}", file=sys.stderr, flush=True)
+    print(f"🎯 使用 Kotoba Pipeline: {USE_KOTOBA_PIPELINE}", file=sys.stderr, flush=True)
     print(f"🎯 LLM 翻譯: {LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}", file=sys.stderr, flush=True)
     print(f"🎯 stable-ts: {USE_STABLE_TS}, VAD: {USE_VAD}", file=sys.stderr, flush=True)
     print(f"="*50, file=sys.stderr, flush=True)
@@ -194,13 +211,59 @@ def init_global_resources():
     except Exception as e:
         print(f"⚠️ LLM 測試失敗: {e}", file=sys.stderr, flush=True)
 
+    start = time.time()
+    
+    # 🎯 根據模型類型選擇載入方式
+    if USE_KOTOBA_PIPELINE:
+        if not TRANSFORMERS_AVAILABLE:
+            print(f"⚠️ 使用 Kotoba v2.1 需要 Transformers，但未安裝", file=sys.stderr, flush=True)
+            print(f"🔄 自動切換到 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
+            # 直接跳到 faster-whisper 載入
+        else:
+            # ===== Kotoba-Whisper v2.1 (Transformers Pipeline) =====
+            try:
+                print(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper...", file=sys.stderr, flush=True)
+                
+                torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {}
+                
+                asr_model = hf_pipeline(
+                    "automatic-speech-recognition",
+                    model=ASR_MODEL_NAME,
+                    torch_dtype=torch_dtype,
+                    device=device,
+                    model_kwargs=model_kwargs,
+                    batch_size=1,  # 直播用單批次
+                    trust_remote_code=True,
+                )
+                
+                DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+                COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "float32"
+                USING_KOTOBA_PIPELINE = True  # 🎯 標記實際使用 Kotoba Pipeline
+                
+                print(f"✅ Kotoba-Whisper v2.1 已就緒 (Transformers)", file=sys.stderr, flush=True)
+                print(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
+                return
+                
+            except Exception as e:
+                print(f"⚠️ Kotoba Pipeline 載入失敗: {e}", file=sys.stderr, flush=True)
+                print(f"🔄 退回使用 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
+                import traceback
+                traceback.print_exc()
+    
+    # ===== 標準 faster-whisper + stable-ts =====
+    # 如果是 Kotoba v2.1 但 Transformers 失敗，改用 large-v3
+    USING_KOTOBA_PIPELINE = False  # 🎯 標記使用 faster-whisper
+    fallback_model = "large-v3" if USE_KOTOBA_PIPELINE else ASR_MODEL_NAME
+    
     def try_load_model(device, compute_type):
         try:
-            print(f"🔄 使用 stable-ts 載入: {device}/{compute_type}...", file=sys.stderr, flush=True)
+            print(f"🔄 使用 stable-ts 載入 {fallback_model}: {device}/{compute_type}...", file=sys.stderr, flush=True)
             
             # 🎯 使用 stable-ts 的 load_faster_whisper
             model = stable_whisper.load_faster_whisper(
-                ASR_MODEL_NAME,
+                fallback_model,  # 🎯 使用 fallback 模型名稱
                 device=device,
                 compute_type=compute_type,
                 download_root=MODEL_CACHE_DIR,
@@ -224,7 +287,6 @@ def init_global_resources():
             traceback.print_exc()
             return None
 
-    start = time.time()
     for device, ctype in [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")]:
         if device == "cuda" and not torch.cuda.is_available():
             continue
@@ -238,7 +300,7 @@ def init_global_resources():
         sys.exit(1)
     
     status = "🚀 GPU" if DEVICE == "cuda" else "⚠️ CPU"
-    print(f"✅ {status} 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
+    print(f"✅ {status} 模式 ({fallback_model}): {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
     print(f"✅ stable-ts 模型已就緒", file=sys.stderr, flush=True)
 
 def check_voice_activity(audio_array: np.ndarray) -> bool:
@@ -253,12 +315,32 @@ def get_context_prompt() -> str:
     return ""
 
 def whisper_asr(audio_array: np.ndarray) -> str:
-    """使用 stable-ts + faster-whisper 進行語音辨識 - 完整整合版"""
+    """使用 ASR 進行語音辨識 - 支援 Kotoba Pipeline 和 faster-whisper"""
     if asr_model is None or not check_voice_activity(audio_array):
         return ""
 
     try:
-        # 🎯 使用 stable-ts 的 transcribe 方法
+        # 🎯 Kotoba-Whisper v2.1 (Transformers Pipeline)
+        if USING_KOTOBA_PIPELINE:
+            # Transformers pipeline 需要的輸入格式
+            audio_input = {
+                "raw": audio_array,
+                "sampling_rate": SAMPLE_RATE
+            }
+            
+            result = asr_model(
+                audio_input,
+                chunk_length_s=15,
+                return_timestamps=True,
+                generate_kwargs={"language": "ja", "task": "transcribe"},
+                ignore_warning=True,  # 🎯 隱藏 chunk_length_s 實驗性警告
+            )
+            
+            text = result.get("text", "").strip() if isinstance(result, dict) else str(result).strip()
+            return text
+        
+        # 🎯 標準 faster-whisper + stable-ts
+        # 使用 stable-ts 的 transcribe 方法
         # 這會自動整合 VAD、靜音抑制、重複移除等功能
         result = asr_model.transcribe(
             audio_array,

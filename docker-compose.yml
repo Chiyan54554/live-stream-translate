@@ -72,8 +72,9 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      # 🌟 large-v3 最準確，large-v3-turbo 較快但略低準確度
-      ASR_MODEL_NAME: large-v3
+      # 🌟 Kotoba-Whisper v2.1：日文優化 + 自動標點 (Transformers Pipeline)
+      # 備選: large-v3 (標準 faster-whisper)
+      ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.1
       MODEL_CACHE_DIR: /root/.cache/huggingface/hub
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       # 🌟 NVIDIA 相關環境變數

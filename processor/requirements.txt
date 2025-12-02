@@ -1,8 +1,12 @@
 faster-whisper>=1.0.0
-stable-ts>=2.18.0
+stable-ts>=2.16.0
 deep-translator>=1.11.4
 redis>=5.0.0
 numpy>=1.24.0
 torch>=2.0.0
 opencc-python-reimplemented>=0.1.7
 aiohttp>=3.9.0
+# 🎯 Kotoba-Whisper v2.1 支援 (Transformers Pipeline)
+transformers>=4.39.0
+accelerate>=0.20.0
+punctuators==0.0.5

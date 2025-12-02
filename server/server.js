@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 ---
 const WSS_PORT = 8080;
-const LIVE_PAGE_URL = 'https://www.twitch.tv/kohaku_uru'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/akamikarubi'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
