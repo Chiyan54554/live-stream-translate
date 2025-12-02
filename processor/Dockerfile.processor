@@ -50,9 +50,13 @@ RUN pip install --no-cache-dir \
     punctuators==0.0.5
 
 # 複製程式碼和資源檔案
-COPY processor/processor.py .
-COPY processor/simplified_to_traditional.txt .
-COPY processor/china_to_taiwan.txt .
+COPY processor/__init__.py .
+COPY processor/config.py .
+COPY processor/text_utils.py .
+COPY processor/translator.py .
+COPY processor/asr.py .
+COPY processor/main.py .
+COPY processor/mappings/ ./mappings/
 
 # 🌟 啟動時設定 LD_LIBRARY_PATH，讓 CTranslate2 優先使用我們安裝的 cuDNN
-CMD ["sh", "-c", "export LD_LIBRARY_PATH=/usr/local/lib/ctranslate2:$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python processor.py"]
+CMD ["sh", "-c", "export LD_LIBRARY_PATH=/usr/local/lib/ctranslate2:$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python -m main"]
