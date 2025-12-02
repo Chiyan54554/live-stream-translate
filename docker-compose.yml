@@ -38,18 +38,21 @@ services:
     environment:
       OLLAMA_HOST: "0.0.0.0:11434"
       NVIDIA_VISIBLE_DEVICES: all
+      # 🎯 指定要使用的模型（啟動時自動下載，如果還沒下載的話）
+      OLLAMA_MODEL: "qwen3:8b"
     
     # 持久化模型，避免重複下載
     volumes:
       - ollama_models:/root/.ollama
     
-    # 健康檢查 (使用 wget 或 ollama 命令)
+    # 健康檢查 - 等待模型下載完成
+    # 🎯 首次啟動可能需要較長時間下載模型 (~5GB)
     healthcheck:
-      test: ["CMD-SHELL", "ollama list || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "ollama list | grep -q qwen3 || exit 1"]
+      interval: 15s
       timeout: 10s
-      retries: 10
-      start_period: 60s
+      retries: 60
+      start_period: 300s
     
     restart: always
 
@@ -72,9 +75,10 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
-      # 🌟 Kotoba-Whisper v2.1：日文優化 + 自動標點 (Transformers Pipeline)
-      # 備選: large-v3 (標準 faster-whisper)
-      ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.1
+      # 🌟 Kotoba-Whisper v2.2：日文優化 Transformers 版 (最新，支援標點)
+      # 備選: kotoba-tech/kotoba-whisper-v2.1, large-v3 (標準 faster-whisper)
+      # ⚠️ v2.2 沒有提供 faster (CTranslate2) 版本
+      ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.2
       MODEL_CACHE_DIR: /root/.cache/huggingface/hub
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       # 🌟 NVIDIA 相關環境變數
@@ -83,7 +87,7 @@ services:
       # 🌟 LLM 翻譯配置 (連接 Docker 內的 Ollama 服務)
       LLM_HOST: ollama
       LLM_PORT: "11434"
-      LLM_MODEL: "qwen2.5:7b-instruct"
+      LLM_MODEL: "qwen3:8b"
     
     volumes:
       - huggingface_cache:/root/.cache/huggingface

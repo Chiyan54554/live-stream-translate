@@ -7,7 +7,7 @@ const path = require('path');
 const Redis = require('ioredis'); 
 
 // --- 配置參數 ---
-const WSS_PORT = 8080;
+const WSS_PORT = 8080; 
 const LIVE_PAGE_URL = 'https://www.twitch.tv/akamikarubi'; // 直播頁面 URL
 
 // Redis 配置
@@ -21,8 +21,8 @@ const SAMPLE_RATE = 16000;
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
 
 // 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
-// 🌟 配合 Python 端 4 秒緩衝
-const CHUNK_DURATION_S = 0.5; // 每 0.5 秒發送一次
+// 🎯 配合 Python 端 2 秒緩衝，縮短發送間隔
+const CHUNK_DURATION_S = 0.25; // 🎯 每 0.25 秒發送一次（加快響應）
 
 // 計算 Node.js 每次發佈到 Redis 所需的位元組數
 const TARGET_CHUNK_SIZE_BYTES = Math.ceil(
@@ -68,8 +68,18 @@ server.listen(WSS_PORT, () => {
 
 // 1. 初始化 Redis 客戶端並訂閱翻譯結果
 function initializeRedisClients() {
-    publisher = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
-    subscriber = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
+    // 🎯 優化 Redis 連線設定
+    const redisOptions = {
+        host: REDIS_HOST,
+        port: REDIS_PORT,
+        retryStrategy: (times) => Math.min(times * 100, 3000),
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: false,  // 🎯 加快啟動
+        lazyConnect: false,
+    };
+    
+    publisher = new Redis(redisOptions);
+    subscriber = new Redis(redisOptions);
 
     publisher.on('error', (err) => { console.error('致命錯誤：Redis Publisher 連線錯誤:', err); });
     subscriber.on('error', (err) => { console.error('致命錯誤：Redis Subscriber 連線錯誤:', err); });
@@ -88,16 +98,22 @@ function initializeRedisClients() {
     // 處理接收到的 Redis 消息 (翻譯結果)
     subscriber.on('message', (channel, message) => {
         if (channel === TRANSLATION_CHANNEL) {
+            // 🎯 優化：直接廣播，減少 JSON 解析開銷
+            let isValid = false;
             try {
-                // 數據是乾淨的 JSON 字符串，直接廣播
-                JSON.parse(message); 
-                wss.clients.forEach(client => {
+                JSON.parse(message);
+                isValid = true;
+            } catch (e) {
+                console.error('無效 JSON:', e.message);
+            }
+            
+            if (isValid) {
+                // 🎯 批次發送給所有客戶端
+                for (const client of wss.clients) {
                     if (client.readyState === WebSocket.OPEN) {
-                        client.send(message); 
+                        client.send(message);
                     }
-                });
-            } catch (error) {
-                console.error('致命錯誤：無法解析 Redis 接收到的 JSON 數據:', error.message);
+                }
             }
         }
     });
@@ -138,12 +154,16 @@ function startStreamProcessing(publisher) {
     });
 
     // 2. 啟動 FFmpeg，從 stdin 讀取音頻 ('-i', 'pipe:0')
+    // 🎯 優化 FFmpeg 參數以降低延遲
     const ffmpegArgs = [
+        '-fflags', '+nobuffer+flush_packets',  // 🎯 降低緩衝延遲
+        '-flags', 'low_delay',                  // 🎯 低延遲模式
         '-i', 'pipe:0',          // 讓 FFmpeg 從其 stdin 讀取數據 (即 yt-dlp 的輸出)
         '-acodec', 'pcm_s16le',
         '-ar', '16000',
         '-ac', '1',
         '-f', 's16le',
+        '-flush_packets', '1',   // 🎯 立即刷新封包
         'pipe:1'                 // 輸出到 stdout
     ];
 

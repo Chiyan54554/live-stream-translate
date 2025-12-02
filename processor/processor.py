@@ -57,10 +57,10 @@ BYTES_PER_SAMPLE = 2
 SOURCE_LANG_CODE = "ja"
 TARGET_LANG_CODE = "zh-TW"
 
-# 🎯 準確率優化：平衡緩衝與延遲
-BUFFER_DURATION_S = 2.0       # 🎯 2 秒緩衝，目標 3 秒延遲
-OVERLAP_DURATION_S = 0.3      # 🎯 最小重疊
-MIN_AUDIO_ENERGY = 0.006      # 🎯 適中的能量門檻
+# 🎯 品質優化：增加緩衝提升準確度
+BUFFER_DURATION_S = 3.0       # 🎯 3 秒緩衝，提升 ASR 品質
+OVERLAP_DURATION_S = 0.5      # 🎯 適度重疊確保連貫性
+MIN_AUDIO_ENERGY = 0.005      # 🎯 稍低門檻，捕捉更多語音
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -69,13 +69,15 @@ TRANSLATION_CHANNEL = "translation_feed"
 
 # 🎯 ASR 模型選擇
 # - large-v3: 標準 faster-whisper 穩定版
-# - kotoba-tech/kotoba-whisper-v2.1: 日文優化 Transformers 版 (幻覺更少，帶標點)
+# - kotoba-tech/kotoba-whisper-v2.2: 日文優化 Transformers 版 (最新，支援標點)
+# - kotoba-tech/kotoba-whisper-v2.1: 日文優化 Transformers 版 (幻覺更少)
 # - kotoba-tech/kotoba-whisper-v2.0-faster: 日文優化 CTranslate2 版 (RTX 50 系列可能不相容)
-ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'kotoba-tech/kotoba-whisper-v2.1')
+# ⚠️ 注意：v2.2 沒有提供 faster 版本
+ASR_MODEL_NAME = os.getenv('ASR_MODEL_NAME', 'kotoba-tech/kotoba-whisper-v2.2')
 MODEL_CACHE_DIR = os.getenv('MODEL_CACHE_DIR', '/root/.cache/huggingface/hub')
 
 # 🎯 自動判斷模型類型
-USE_KOTOBA_PIPELINE = 'kotoba-whisper-v2.1' in ASR_MODEL_NAME
+USE_KOTOBA_PIPELINE = 'kotoba-whisper-v2.1' in ASR_MODEL_NAME or 'kotoba-whisper-v2.2' in ASR_MODEL_NAME
 USING_KOTOBA_PIPELINE = False  # 🎯 實際使用的模式 (由 init_global_resources 設定)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,7 +88,7 @@ LLM_HOST = os.getenv('LLM_HOST', 'ollama')  # Docker 服務名稱
 LLM_PORT = os.getenv('LLM_PORT', '11434')
 LLM_MODEL = os.getenv('LLM_MODEL', 'qwen2.5:7b-instruct')  # Qwen2.5 7B Instruct
 LLM_API_URL = f"http://{LLM_HOST}:{LLM_PORT}/api/generate"
-LLM_TIMEOUT = 8  # 🎯 翻譯超時秒數（縮短加快響應）
+LLM_TIMEOUT = 10  # 🎯 翻譯超時秒數（給予足夠時間提升品質）
 
 # 🎯 stable-ts 與 VAD 相關設定
 USE_STABLE_TS = True                    # 啟用 stable-ts
@@ -105,8 +107,11 @@ last_transcription = ""
 last_full_sentence = ""       # 🎯 新增：記錄上一個完整句子
 pending_text = ""             # 🎯 新增：待處理的不完整文字
 last_publish_time = 0
-recent_texts = deque(maxlen=10)
-context_history = deque(maxlen=5)  # 🎯 縮短上下文減少開銷
+recent_texts = deque(maxlen=15)         # 🎯 增加重複檢測範圍
+context_history = deque(maxlen=8)       # 🎯 增加上下文提升連貫性
+
+# 🎯 並行處理：待翻譯佇列
+pending_translation_task = None  # 🎯 當前正在執行的翻譯任務
 
 # 🎯 異步 HTTP session (全域)
 aio_session: aiohttp.ClientSession = None
@@ -220,9 +225,10 @@ def init_global_resources():
             print(f"🔄 自動切換到 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
             # 直接跳到 faster-whisper 載入
         else:
-            # ===== Kotoba-Whisper v2.1 (Transformers Pipeline) =====
+            # ===== Kotoba-Whisper v2.1/v2.2 (Transformers Pipeline) =====
             try:
-                print(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper...", file=sys.stderr, flush=True)
+                model_version = "v2.2" if "v2.2" in ASR_MODEL_NAME else "v2.1"
+                print(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper {model_version}...", file=sys.stderr, flush=True)
                 
                 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
                 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -242,7 +248,7 @@ def init_global_resources():
                 COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "float32"
                 USING_KOTOBA_PIPELINE = True  # 🎯 標記實際使用 Kotoba Pipeline
                 
-                print(f"✅ Kotoba-Whisper v2.1 已就緒 (Transformers)", file=sys.stderr, flush=True)
+                print(f"✅ Kotoba-Whisper {model_version} 已就緒 (Transformers)", file=sys.stderr, flush=True)
                 print(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
                 return
                 
@@ -320,7 +326,7 @@ def whisper_asr(audio_array: np.ndarray) -> str:
         return ""
 
     try:
-        # 🎯 Kotoba-Whisper v2.1 (Transformers Pipeline)
+        # 🎯 Kotoba-Whisper v2.1/v2.2 (Transformers Pipeline)
         if USING_KOTOBA_PIPELINE:
             # Transformers pipeline 需要的輸入格式
             audio_input = {
@@ -330,9 +336,12 @@ def whisper_asr(audio_array: np.ndarray) -> str:
             
             result = asr_model(
                 audio_input,
-                chunk_length_s=10,            # 🎯 縮短 chunk 加快處理
+                chunk_length_s=15,            # 🎯 增加 chunk 提升品質
                 return_timestamps=True,
-                generate_kwargs={"language": "ja", "task": "transcribe"},
+                generate_kwargs={
+                    "language": "ja",
+                    "task": "transcribe",
+                },
                 ignore_warning=True,  # 🎯 隱藏 chunk_length_s 實驗性警告
             )
             
@@ -426,32 +435,23 @@ def whisper_asr(audio_array: np.ndarray) -> str:
         return ""
 
 async def llm_translate(text: str) -> str:
-    """🎯 異步版：使用 Ollama Qwen2 LLM 進行日文到繁體中文翻譯"""
+    """🎯 異步版：使用 Ollama Qwen3 LLM 進行日文到繁體中文翻譯"""
     global aio_session
     
     if not text:
         return ""
     
-    # 🎯 優化的翻譯 prompt - 使用 ChatML 格式
-    prompt = f"""<|im_start|>system
-你是專業的日文即時直播翻譯員。將日文遊戲直播對話翻譯成自然流暢的繁體中文。
+    # 🎯 Qwen3 prompt - 簡潔直接
+    prompt = f"""你是專業的日文即時直播翻譯員。將以下日文翻譯成自然流暢的繁體中文（台灣用語）。
 
-重要規則：
-- 只輸出翻譯結果，不要解釋或加註
-- 使用繁體中文和台灣慣用語
-- 保持口語化、自然的對話語氣
-- 如果輸入是不完整片段或單字，翻譯其最可能的意思
-- 如果輸入無法辨識或沒有意義，回覆空白
-- 人名保留日文發音的音譯（如：ゆうき→優希）
-- 遊戲術語使用台灣玩家常用譯法
-- 不要重複翻譯同樣的內容
-- 不要自行添加原文沒有的內容
-<|im_end|>
-<|im_start|>user
-{text}
-<|im_end|>
-<|im_start|>assistant
-"""
+規則：
+- 只輸出翻譯結果
+- 保持口語化語氣
+- 人名音譯保留日文發音
+- 無意義輸入回覆空白
+
+日文：{text}
+翻譯："""
     
     try:
         async with aio_session.post(
@@ -460,12 +460,14 @@ async def llm_translate(text: str) -> str:
                 "model": LLM_MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "raw": True,
+                "think": False,  # 🎯 禁用 Qwen3 思考模式，避免輸出思考過程
                 "options": {
-                    "temperature": 0.1,       # 🎯 降低溫度加快生成
-                    "top_p": 0.85,            # 🎯 稍微收緊
-                    "num_predict": 150,       # 🎯 縮短最大輸出
-                    "stop": ["<|im_end|>", "<|im_start|>", "\n\n", "日文原文"]
+                    "temperature": 0.3,       # 🎯 適度創意提升自然度
+                    "top_p": 0.9,             # 🎯 放寬採樣提升多樣性
+                    "top_k": 40,              # 🎯 限制候選詞提升品質
+                    "num_predict": 200,       # 🎯 足夠長度處理複雜句子
+                    "repeat_penalty": 1.1,    # 🎯 減少重複
+                    "stop": ["\n\n", "日文：", "日文原文", "翻譯："]
                 }
             },
             timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT)
@@ -1174,9 +1176,20 @@ def merge_incomplete_sentence(pending: str, new_text: str) -> tuple:
 # ----------------------------------------------------
 
 async def process_audio_chunk(audio_data_b64: str, r):
-    """🎯 異步版：處理音訊塊，使用滑動視窗機制"""
+    """🎯 異步版：處理音訊塊，使用滑動視窗機制 + 並行翻譯"""
     global audio_buffer, overlap_buffer, last_transcription, last_publish_time
-    global recent_texts, pending_text, last_full_sentence
+    global recent_texts, pending_text, last_full_sentence, pending_translation_task
+    
+    # 🎯 先檢查上一個翻譯任務是否完成，如果完成就發布
+    if pending_translation_task is not None:
+        if pending_translation_task.done():
+            try:
+                result = pending_translation_task.result()
+                if result:
+                    await r.publish(TRANSLATION_CHANNEL, json.dumps(result, ensure_ascii=False))
+            except Exception as e:
+                print(f"翻譯任務錯誤: {e}", file=sys.stderr, flush=True)
+            pending_translation_task = None
     
     # 解碼音訊
     raw_bytes = base64.b64decode(audio_data_b64)
@@ -1244,24 +1257,31 @@ async def process_audio_chunk(audio_data_b64: str, r):
     recent_texts.append(complete_sentence)
     context_history.append(complete_sentence)
     
-    # 🎯 異步 LLM 翻譯
-    translation = await llm_translate(complete_sentence)
+    # 🎯 並行翻譯：啟動翻譯任務但不等待，讓下一個 ASR 可以同時進行
+    async def translate_and_prepare_result(text_to_translate):
+        """翻譯並準備結果"""
+        translation = await llm_translate(text_to_translate)
+        tz = timezone(timedelta(hours=8))
+        return {
+            "timestamp": datetime.now(tz).strftime("%H:%M:%S"),
+            "source_lang": SOURCE_LANG_CODE,
+            "target_lang": TARGET_LANG_CODE,
+            "duration_s": f"{BUFFER_DURATION_S:.3f}",
+            "transcription": text_to_translate,
+            "translation": translation
+        }
     
-    # 發布結果
-    tz = timezone(timedelta(hours=8))
-    result = {
-        "timestamp": datetime.now(tz).strftime("%H:%M:%S"),
-        "source_lang": SOURCE_LANG_CODE,
-        "target_lang": TARGET_LANG_CODE,
-        "duration_s": f"{BUFFER_DURATION_S:.3f}",
-        "transcription": complete_sentence,
-        "translation": translation
-    }
+    # 🎯 如果有正在進行的翻譯，等待它完成再啟動新的
+    if pending_translation_task is not None and not pending_translation_task.done():
+        try:
+            result = await pending_translation_task
+            if result:
+                await r.publish(TRANSLATION_CHANNEL, json.dumps(result, ensure_ascii=False))
+        except Exception as e:
+            print(f"翻譯任務錯誤: {e}", file=sys.stderr, flush=True)
     
-    try:
-        await r.publish(TRANSLATION_CHANNEL, json.dumps(result, ensure_ascii=False))
-    except Exception as e:
-        print(f"發佈錯誤: {e}", file=sys.stderr, flush=True)
+    # 🎯 啟動新的翻譯任務（非阻塞）
+    pending_translation_task = asyncio.create_task(translate_and_prepare_result(complete_sentence))
 
 async def main():
     """🎯 異步主循環"""
