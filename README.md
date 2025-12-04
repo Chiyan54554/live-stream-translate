@@ -1,332 +1,244 @@
-# 🎙️ Live Stream Translator
+# 🎙️ Live Stream Real-time Translation System (直播即時翻譯系統) v2.2
 
-實時將日文直播轉錄並翻譯成繁體中文的自動化系統。
+一個高效能的實時直播翻譯系統，專為日文直播設計。採用 **Kotoba-Whisper v2.2**（日文優化 ASR）+ **Ollama Qwen3:8b**（本地 LLM 翻譯）架構，透過 WebSocket 將翻譯結果即時推送到 Web 客戶端。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white" alt="CUDA">
-  <img src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License">
-</p>
+![License](https://img.shields.io/badge/license-ISC-blue.svg)
+![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
+![Node.js](https://img.shields.io/badge/node.js-6DA55F?style=flat&logo=node.js&logoColor=white)
+![Python](https://img.shields.io/badge/python-3670A0?style=flat&logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.9-EE4C2C?style=flat&logo=pytorch&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?style=flat&logo=nvidia&logoColor=white)
 
----
+## ✨ v2.2 核心特色
 
-## 📖 目錄
+### 🧠 AI 引擎升級
+- **Kotoba-Whisper v2.2**：專為日文優化的 Whisper 模型，支援標點符號輸出，幻覺更少
+- **Ollama Qwen3:8b**：本地運行的高品質 LLM 翻譯，無需 API 金鑰，隱私安全
+- **stable-ts 整合**：時間戳對齊與 VAD 增強，提升識別精度
 
-- [功能特色](#-功能特色)
-- [系統架構](#-系統架構)
-- [系統需求](#-系統需求)
-- [快速開始](#-快速開始)
-- [配置說明](#-配置說明)
-- [模型比較](#-模型比較)
-- [費用估算](#-費用估算)
-- [常見問題](#-常見問題)
-- [專案結構](#-專案結構)
-- [致謝](#-致謝)
+### ⚡ 效能優化
+- **GPU 加速**：完整支援 NVIDIA CUDA 12.8 + cuDNN 9，RTX 50 系列相容
+- **高效資料結構**：預編譯正則表達式、frozenset O(1) 查找、LRU 快取
+- **智能緩衝**：5 秒滑動視窗 + 1.5 秒重疊，平衡延遲與準確度
 
----
+### 🛡️ 翻譯品質
+- **多層幻覺過濾**：ASR 幻覺檢測、重複詞過濾、無意義音譯過濾
+- **OpenCC 繁簡轉換**：自動將簡體轉換為台灣繁體用語
+- **中台用語轉換**：「視頻→影片」、「軟件→軟體」等在地化
 
-## ✨ 功能特色
-
-| 功能 | 說明 |
-|:----:|------|
-| 🎯 | **日文語音辨識** - Kotoba-Whisper v2.2 日文優化模型 |
-| 🌐 | **智能翻譯** - 本地 LLM (Ollama) 或雲端 API |
-| ⚡ | **低延遲** - yt-dlp + FFmpeg 管道串流，約 4-6 秒延遲 |
-| 🖥️ | **網頁介面** - 即時顯示翻譯，支援自動滾動 |
-| 🐳 | **容器化** - Docker Compose 一鍵部署 |
-| 🔄 | **自動重連** - 串流中斷自動恢復 |
-
----
+### 🌐 現代化介面
+- **響應式 Web UI**：深色模式、自動滾動、訊息上限控制
+- **事件委派優化**：高效 DOM 操作，流暢處理大量訊息
 
 ## 🏗️ 系統架構
 
-### 服務組成
+系統由四個 Docker 容器組成，透過 Redis 進行高效能通訊：
 
-| 服務 | 技術 | 功能 |
+```mermaid
+graph TD
+    Live["直播源 (Twitch)"] -->|yt-dlp/ffmpeg| Node["Node.js Server"]
+    Node -->|"音訊數據 (Pub, 0.25s chunks)"| Redis[("Redis Message Broker")]
+    Node -->|"翻譯結果 (Sub)"| Redis
+    Redis -->|"音訊數據 (Sub)"| Python["Python Processor"]
+    Python -->|"翻譯結果 (Pub)"| Redis
+    Node -->|WebSocket| Client["Web Client (Browser)"]
+    Python -->|"Kotoba-Whisper v2.2 (ASR)"| Python
+    Python -->|"Ollama Qwen3:8b (MT)"| Python
+```
+
+### Docker 服務組成
+
+| 服務 | 說明 | 埠口 |
 |------|------|------|
-| **Server** | Node.js | yt-dlp 串流擷取、FFmpeg 音訊轉換、WebSocket 推送 |
-| **Redis** | Redis 8.4 | Pub/Sub 訊息佇列 |
-| **Processor** | Python 3.11 | Whisper ASR 語音辨識、文字過濾 |
-| **Ollama** | Ollama + qwen3:8b | LLM 日中翻譯 |
-| **Client** | HTML/JS | 網頁即時顯示翻譯結果 |
-
-### 資料流程
-
-1. **音訊擷取**：`直播平台` → `yt-dlp` → `FFmpeg` → `PCM 16kHz mono`
-2. **訊息傳遞**：`Server` → `Redis (audio_feed)` → `Processor`
-3. **語音辨識**：`Processor` → `Whisper ASR` → `日文文字`
-4. **翻譯處理**：`日文文字` → `Ollama LLM` → `繁體中文`
-5. **結果推送**：`Processor` → `Redis (translation_feed)` → `Server` → `WebSocket` → `瀏覽器`
-
-### 通訊方式
-
-| 來源 | 目標 | 協定 | 頻道/端口 |
-|------|------|------|----------|
-| Server | Redis | TCP | `audio_feed` |
-| Redis | Processor | TCP | `audio_feed` |
-| Processor | Ollama | HTTP | `:11434/api/generate` |
-| Processor | Redis | TCP | `translation_feed` |
-| Redis | Server | TCP | `translation_feed` |
-| Server | 瀏覽器 | WebSocket | `:8080` |
-
-### 資料流程
-
-```
-音訊流程：直播 ──▶ yt-dlp ──▶ FFmpeg ──▶ PCM 16kHz ──▶ Redis ──▶ Whisper
-翻譯流程：日文文字 ──▶ Ollama LLM ──▶ 繁體中文
-顯示流程：翻譯結果 ──▶ Redis ──▶ WebSocket ──▶ 瀏覽器
-```
-
----
-
-## 📦 系統需求
-
-### 硬體
-
-| 項目 | 最低需求 | 推薦配置 |
-|------|:--------:|:--------:|
-| GPU | NVIDIA 8GB VRAM | NVIDIA 12GB+ VRAM |
-| RAM | 8GB | 16GB |
-| 硬碟 | 20GB | 50GB |
-
-### 軟體
-
-- Docker Desktop 4.0+
-- NVIDIA Container Toolkit
-- NVIDIA Driver 535+
-
-### VRAM 使用量
-
-| ASR 模型 | 翻譯引擎 | VRAM |
-|----------|----------|:----:|
-| `medium` | Google Translate | ~5GB |
-| `large-v3-turbo` | Google Translate | ~6GB |
-| `kotoba-v2.2` | Google Translate | ~10GB |
-| `kotoba-v2.2` | Ollama qwen3:8b | ~14GB |
-
----
+| `redis` | Redis 8.x 訊息佇列 | 6379 (內部) |
+| `ollama` | Ollama LLM 服務 + Qwen3:8b | 11434 (內部) |
+| `processor` | Python ASR + 翻譯處理器 | - |
+| `server` | Node.js WebSocket 伺服器 | 8080 |
 
 ## 🚀 快速開始
 
-### 1️⃣ 複製專案
+### 硬體需求
 
-```bash
-git clone https://github.com/chiyan/live-stream-translate.git
-cd live-stream-translate
-```
+| 項目 | 最低需求 | 建議配置 |
+|------|----------|----------|
+| GPU | NVIDIA GTX 1080 (8GB VRAM) | RTX 3080+ / RTX 50 系列 |
+| RAM | 16GB | 32GB |
+| 硬碟 | 20GB 可用空間 | SSD 推薦 |
 
-### 2️⃣ 設定直播 URL
+### 軟體需求
+
+- **Docker** & **Docker Compose**
+- **NVIDIA Container Toolkit** ([安裝指南](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html))
+- **CUDA 12.x** 驅動程式
+
+### 安裝步驟
+
+1. **複製專案**
+   ```bash
+   git clone https://github.com/Chiyan54554/live-stream-translate.git
+   cd live-stream-translate
+   ```
+
+2. **建立 Ollama 模型持久化 Volume**
+   ```bash
+   docker volume create live-stream-translate_ollama_models
+   ```
+
+3. **啟動服務**
+   ```bash
+   docker compose up --build
+   ```
+   > ⏳ 首次啟動會下載：
+   > - Kotoba-Whisper v2.2 模型 (~3GB)
+   > - Qwen3:8b LLM 模型 (~5GB)
+   > - Docker 基礎映像檔
+
+4. **開啟客戶端**
+   
+   瀏覽器訪問：`http://localhost:8080`
+
+## ⚙️ 配置說明
+
+### 修改直播源
 
 編輯 `server/server.js`：
 
 ```javascript
-const LIVE_PAGE_URL = 'https://www.twitch.tv/your-channel';
+const LIVE_PAGE_URL = 'https://www.twitch.tv/your_streamer';
 ```
 
-### 3️⃣ 啟動服務
+支援平台：
+- ✅ Twitch
+- ✅ YouTube Live
+- ✅ 其他 yt-dlp 支援的平台
 
-**Windows:**
-```batch
-start.bat
+### 更換 ASR 模型
+
+編輯 `docker-compose.yml` 中的 `processor` 環境變數：
+
+```yaml
+environment:
+  # 日文優化（推薦）
+  ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.2
+  
+  # 備選方案
+  # ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.1  # 幻覺更少
+  # ASR_MODEL_NAME: large-v3                          # 標準 Whisper
 ```
 
-**Linux / macOS:**
-```bash
-chmod +x start.sh
-./start.sh
-```
-
-**或使用 Docker Compose:**
-```bash
-docker-compose up --build
-```
-
-> ⏳ 首次啟動需下載模型（約 10-15GB），請耐心等待
-
-### 4️⃣ 開啟網頁
-
-```
-http://localhost:8080
-```
-
-### 📋 啟動腳本選項
-
-| 選項 | 說明 |
-|------|------|
-| `--build` | 強制重建 Docker 映像 |
-| `--stop` | 停止所有服務 |
-| `--logs` | 查看即時日誌 |
-| `--clean` | 清除所有容器和映像 |
-
----
-
-## ⚙️ 配置說明
-
-### ASR 模型
+### 更換 LLM 模型
 
 編輯 `docker-compose.yml`：
 
 ```yaml
 environment:
-  # === 日文優化（推薦）===
-  ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.2
-  
-  # === 標準 Whisper ===
-  # ASR_MODEL_NAME: large-v3
-  # ASR_MODEL_NAME: large-v3-turbo    # 較快
-  # ASR_MODEL_NAME: medium            # 省 VRAM
+  LLM_MODEL: "qwen3:8b"          # 預設（推薦）
+  # LLM_MODEL: "qwen2.5:7b"       # 備選
+  # LLM_MODEL: "llama3.1:8b"      # 英文更強
 ```
 
-### 翻譯引擎
-
-| 引擎 | 設定 | 費用 |
-|------|------|:----:|
-| Ollama (預設) | `LLM_MODEL: qwen3:8b` | 免費 |
-| Google Translate | 修改 `translator.py` | 免費 |
-| OpenAI | `OPENAI_API_KEY: xxx` | ~$0.20/2hr |
-
-### 緩衝設定
+### 調整緩衝參數
 
 編輯 `processor/config.py`：
 
 ```python
-BUFFER_DURATION_S = 4.0     # 音訊緩衝（秒）
-MIN_PUBLISH_INTERVAL = 0.8  # 發布間隔（秒）
+BUFFER_DURATION_S = 5.0   # 緩衝區長度（秒）- 越長準確度越高，延遲越大
+OVERLAP_DURATION_S = 1.5  # 重疊長度（秒）- 防止句子被切斷
 ```
-
----
-
-## 📊 模型比較
-
-### ASR 模型
-
-| 模型 | 日文準確度 | 速度 | VRAM |
-|------|:----------:|:----:|:----:|
-| kotoba-v2.2 | ⭐⭐⭐⭐⭐ | 中 | 10GB |
-| large-v3 | ⭐⭐⭐⭐ | 中 | 10GB |
-| large-v3-turbo | ⭐⭐⭐⭐ | 快 | 6GB |
-| medium | ⭐⭐⭐ | 快 | 5GB |
-
-### 翻譯引擎
-
-| 引擎 | 品質 | 速度 | 費用 |
-|------|:----:|:----:|:----:|
-| Ollama qwen3:8b | ⭐⭐⭐⭐ | 中 | 免費 |
-| Google Translate | ⭐⭐⭐ | 快 | 免費 |
-| GPT-4o-mini | ⭐⭐⭐⭐⭐ | 快 | $0.20/2hr |
-
----
-
-## 💰 費用估算
-
-### 2 小時直播
-
-| 配置 | 費用 |
-|------|:----:|
-| 本地 Whisper + Ollama | **$0** |
-| 本地 Whisper + Google | **$0** |
-| 本地 Whisper + GPT-4o-mini | ~$0.20 |
-| Deepgram + GPT-4o-mini | ~$0.70 |
-
----
-
-## ❓ 常見問題
-
-<details>
-<summary><b>模型下載很慢？</b></summary>
-
-使用 HuggingFace 鏡像：
-
-```yaml
-environment:
-  HF_ENDPOINT: https://hf-mirror.com
-```
-</details>
-
-<details>
-<summary><b>CUDA out of memory？</b></summary>
-
-1. 使用較小模型：`ASR_MODEL_NAME: medium`
-2. 關閉 Ollama，改用 Google Translate
-3. 減少 `BUFFER_DURATION_S`
-</details>
-
-<details>
-<summary><b>翻譯有重複內容？</b></summary>
-
-調整 `processor/config.py`：
-
-```python
-SIMILARITY_THRESHOLD = 0.75  # 提高此值
-```
-</details>
-
-<details>
-<summary><b>yt-dlp 無法擷取串流？</b></summary>
-
-1. 確認直播正在進行中
-2. 更新 yt-dlp：重建 Docker 映像
-3. 檢查網路連線
-</details>
-
----
 
 ## 📁 專案結構
 
 ```
 live-stream-translate/
-├── 📄 docker-compose.yml     # 服務編排
-├── 📄 Dockerfile.server      # Node.js 映像
-├── 📄 client.html            # 網頁前端
+├── client.html              # Web 客戶端介面
+├── docker-compose.yml       # Docker Compose 配置
+├── Dockerfile.server        # Node.js Server Dockerfile
+├── README.md
 │
-├── 📂 server/
-│   ├── server.js             # 串流處理 + WebSocket
-│   └── package.json
+├── ollama/
+│   ├── Dockerfile.ollama    # Ollama 服務 Dockerfile
+│   └── entrypoint.sh        # 啟動腳本（自動載入模型）
 │
-├── 📂 processor/
-│   ├── Dockerfile.processor  # Python 映像
-│   ├── main.py               # 主程式入口
-│   ├── asr.py                # 語音辨識
-│   ├── translator.py         # 翻譯模組
-│   ├── text_utils.py         # 文字處理
-│   └── config.py             # 配置檔
+├── processor/
+│   ├── Dockerfile.processor # Python 處理器 Dockerfile
+│   ├── requirements.txt     # Python 依賴
+│   ├── config.py            # 配置參數
+│   ├── main.py              # 主程式入口
+│   ├── asr.py               # ASR 模組（Kotoba-Whisper）
+│   ├── translator.py        # LLM 翻譯模組
+│   ├── text_utils.py        # 文字處理工具
+│   └── mappings/            # 用語轉換表
+│       ├── china_to_taiwan.txt
+│       └── simplified_to_traditional.txt
 │
-└── 📂 ollama/
-    ├── Dockerfile.ollama     # Ollama 映像
-    └── entrypoint.sh         # 啟動腳本
+└── server/
+    ├── package.json
+    └── server.js            # Node.js WebSocket 伺服器
 ```
 
----
+## 🛠️ 技術棧
 
-## 📝 更新日誌
+| 層級 | 技術 |
+|------|------|
+| **Frontend** | HTML5, CSS3 (Dark Mode), Vanilla JS |
+| **Backend** | Node.js 25.x, yt-dlp, FFmpeg |
+| **AI Core** | PyTorch 2.9, Transformers, stable-ts |
+| **ASR** | Kotoba-Whisper v2.2 (Transformers Pipeline) |
+| **Translation** | Ollama + Qwen3:8b, OpenCC (s2twp) |
+| **Infra** | Docker, Redis 8.x, CUDA 12.8, cuDNN 9 |
 
-### v1.0.0 (2024-01)
-- ✅ 初始版本
-- ✅ 支援 Twitch / YouTube
-- ✅ Kotoba-Whisper v2.2
-- ✅ Ollama 本地翻譯
+## 📝 常見問題
 
----
+### Q: 字幕延遲多少是正常的？
+A: 系統設計延遲約 **5-8 秒**，包含：
+- 5 秒音訊緩衝
+- ASR 處理時間 (~0.3s)
+- LLM 翻譯時間 (~0.2s)
+- 直播本身延遲
+
+### Q: VRAM 不足怎麼辦？
+A: 可以嘗試以下方案：
+1. 使用較小的 LLM 模型：`LLM_MODEL: "qwen2.5:3b"`
+2. 使用較小的 ASR 模型：`ASR_MODEL_NAME: "small"`
+3. 降低 Ollama context length（在 docker-compose.yml 中設定 `OLLAMA_CONTEXT_LENGTH: 2048`）
+
+### Q: 如何支援其他語言？
+A: 修改 `processor/config.py`：
+```python
+SOURCE_LANG_CODE = "ja"    # 源語言
+TARGET_LANG_CODE = "zh-TW" # 目標語言
+```
+並調整 `translator.py` 中的 LLM Prompt。
+
+### Q: Docker 啟動失敗？
+A: 常見解決方案：
+```bash
+# 清理 Docker 快取
+docker builder prune -f
+
+# 重新建立 Volume
+docker volume rm live-stream-translate_ollama_models
+docker volume create live-stream-translate_ollama_models
+
+# 重新啟動
+docker compose up --build
+```
+
+## 📊 效能參考
+
+在 RTX 5070 Ti (16GB VRAM) 上的測試結果：
+
+| 指標 | 數值 |
+|------|------|
+| ASR 處理時間 | ~0.3s / 5s 音訊 |
+| LLM 翻譯時間 | ~0.15s / 句 |
+| VRAM 使用量 | ~10GB (ASR + LLM) |
+| 端到端延遲 | ~6-7 秒 |
+
+## 🤝 貢獻
+
+歡迎提交 Issue 或 Pull Request！
 
 ## 📄 授權
 
-[MIT License](LICENSE)
-
----
-
-## 🙏 致謝
-
-| 專案 | 用途 |
-|------|------|
-| [OpenAI Whisper](https://github.com/openai/whisper) | 語音辨識基礎 |
-| [Kotoba-Whisper](https://huggingface.co/kotoba-tech) | 日文優化模型 |
-| [stable-ts](https://github.com/jianfch/stable-ts) | 時間戳優化 |
-| [Ollama](https://ollama.ai) | 本地 LLM |
-| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | 串流擷取 |
-
----
-
-<p align="center">
-  Made with ❤️ for VTuber fans
-</p>
+ISC License
