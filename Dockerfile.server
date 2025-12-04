@@ -1,22 +1,28 @@
 # Dockerfile.server
 FROM node:25.2.1-slim
 
-# 安裝 FFmpeg, yt-dlp, 和 Python
+# 🚀 環境變數：停用 npm 進度顯示加速安裝
+ENV NPM_CONFIG_PROGRESS=false \
+    NPM_CONFIG_LOGLEVEL=error \
+    NODE_ENV=production
+
+# 安裝 FFmpeg, yt-dlp, 和 Python (合併指令減少層數)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    python3 \
+    python3-minimal \
     python3-pip \
-    # 🌟 解決 PEP 668 錯誤：加入 --break-system-packages 旗標
-    && pip install yt-dlp --break-system-packages \
-    && rm -rf /var/lib/apt/lists/*
+    && pip install --no-cache-dir yt-dlp --break-system-packages \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && apt-get clean
 
 # 設置 Node.js 服務器
 WORKDIR /app/server
-# 複製 package.json，運行 npm install
-COPY server/package.json .
-RUN npm install
 
-# 複製應用程式碼和 client.html
+# 複製 package.json 並安裝依賴 (分開 COPY 利用快取)
+COPY server/package.json .
+RUN npm install --omit=dev --no-audit --no-fund
+
+# 複製應用程式碼
 COPY server/server.js .
 COPY client.html ../client.html
 

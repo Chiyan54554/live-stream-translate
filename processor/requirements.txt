@@ -1,23 +1,23 @@
 # 🚀 大型套件（鎖定版本，利用快取）
-nvidia-cudnn-cu12==9.10.2.21
+nvidia-cudnn-cu12==9.16.0.29
 
 # ASR 核心
-faster-whisper>=1.0.0
-stable-ts>=2.16.0
+faster-whisper>=1.2.1
+stable-ts>=2.19.1
 
 # 🎯 Kotoba-Whisper v2.2 支援 (Transformers Pipeline)
-transformers>=4.39.0
-accelerate>=0.20.0
-punctuators==0.0.5
+transformers>=4.57.3
+accelerate>=1.12.0
+punctuators==0.0.7
 
 # 翻譯與工具
 deep-translator>=1.11.4
 opencc-python-reimplemented>=0.1.7
 
 # 異步 I/O
-redis>=5.0.0
-aiohttp>=3.9.0
+redis>=7.1.0
+aiohttp>=3.13.2
 
-# 基礎
-numpy>=1.24.0
-torch>=2.0.0
+# 基礎 (NumPy 2.x 與 PyTorch/stable-ts 有相容性問題，使用 1.x)
+# ⚠️ torch 在 Dockerfile 中單獨安裝 (需要特定 CUDA 版本)
+numpy>=1.26.0,<2.0.0
