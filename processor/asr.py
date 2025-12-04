@@ -1,9 +1,11 @@
 """
 ASR 模組 - 語音辨識
+🚀 優化版：預建立參數字典、減少重複運算
 """
 import os
 import sys
 import time
+import traceback
 import numpy as np
 from collections import Counter
 
@@ -20,6 +22,67 @@ DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
 USING_KOTOBA_PIPELINE = False
 TRANSFORMERS_AVAILABLE = False
+
+# ============================================================
+# 🚀 預建立 ASR 參數字典（避免每次呼叫重新建立）
+# ============================================================
+
+# Kotoba Pipeline 音訊輸入模板（每次只需更新 raw）
+_KOTOBA_AUDIO_TEMPLATE = {
+    "sampling_rate": SAMPLE_RATE
+}
+
+# Kotoba Pipeline 生成參數（不變）
+_KOTOBA_GENERATE_KWARGS = {
+    "language": "ja",
+    "task": "transcribe",
+    "num_beams": 5,
+    "do_sample": False,
+    "repetition_penalty": 1.3,
+    "no_repeat_ngram_size": 4,
+    "length_penalty": 1.0,
+    "max_new_tokens": 440,
+}
+
+# Kotoba Pipeline 呼叫參數（不含音訊）
+_KOTOBA_PIPELINE_KWARGS = {
+    "chunk_length_s": 30,
+    "stride_length_s": [4, 2],
+    "batch_size": 1,
+    "return_timestamps": True,
+    "ignore_warning": True,
+    "generate_kwargs": _KOTOBA_GENERATE_KWARGS,
+}
+
+# stable-ts 轉錄參數（不變）
+_STABLE_TS_KWARGS = {
+    "language": SOURCE_LANG_CODE,
+    "beam_size": 5,
+    "best_of": 5,
+    "patience": 1.2,
+    "temperature": [0.0, 0.2],
+    "compression_ratio_threshold": 2.0,
+    "condition_on_previous_text": False,
+    "no_speech_threshold": 0.5,
+    "log_prob_threshold": AVG_PROB_THRESHOLD,
+    "initial_prompt": "",
+    "word_timestamps": True,
+    "vad": USE_VAD,
+    "vad_threshold": VAD_THRESHOLD,
+    "suppress_silence": SUPPRESS_SILENCE,
+    "suppress_word_ts": True,
+    "min_word_dur": 0.1,
+    "nonspeech_error": 0.3,
+    "only_voice_freq": ONLY_VOICE_FREQ,
+    "regroup": True,
+}
+
+# 置信度閾值（預計算）
+_CONFIDENCE_THRESHOLDS = (
+    (-0.4, 0.3, 0),   # (avg_prob_min, no_speech_max, min_text_len)
+    (-0.7, 0.4, 3),
+    (-1.0, 0.15, 5),
+)
 
 
 def setup_environment():
@@ -63,41 +126,6 @@ def init_asr_model():
     
     import torch
     import stable_whisper
-    import requests
-    import threading
-    from config import LLM_API_URL, LLM_MODEL
-    
-    # 並行測試 LLM 連線並預熱模型
-    def test_llm_async():
-        import time as _time
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                print(f"🔄 等待 LLM 模型載入... ({attempt + 1}/{max_retries})", file=sys.stderr, flush=True)
-                test_resp = requests.post(
-                    LLM_API_URL,
-                    json={"model": LLM_MODEL, "prompt": "測試", "stream": False, "think": False},
-                    timeout=60  # 首次載入需要較長時間
-                )
-                if test_resp.status_code == 200:
-                    print(f"✅ LLM 翻譯引擎就緒 ({LLM_MODEL})", file=sys.stderr, flush=True)
-                    return
-                else:
-                    print(f"⚠️ LLM 回應異常: {test_resp.status_code}", file=sys.stderr, flush=True)
-            except requests.exceptions.Timeout:
-                print(f"⚠️ LLM 載入中，等待...", file=sys.stderr, flush=True)
-                _time.sleep(2)
-            except requests.exceptions.ConnectionError:
-                print(f"⚠️ Ollama 尚未就緒，等待...", file=sys.stderr, flush=True)
-                _time.sleep(2)
-            except Exception as e:
-                print(f"⚠️ LLM 測試失敗: {e}", file=sys.stderr, flush=True)
-                _time.sleep(2)
-        print(f"⚠️ LLM 預熱失敗，翻譯可能延遲", file=sys.stderr, flush=True)
-    
-    # 啟動 LLM 測試（非阻塞）
-    llm_thread = threading.Thread(target=test_llm_async, daemon=True)
-    llm_thread.start()
 
     start = time.time()
     
@@ -140,15 +168,11 @@ def init_asr_model():
                 
                 print(f"✅ Kotoba-Whisper {model_version} 已就緒 (Transformers)", file=sys.stderr, flush=True)
                 print(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
-                
-                # 等待 LLM 測試完成
-                llm_thread.join(timeout=5)
                 return
                 
             except Exception as e:
                 print(f"⚠️ Kotoba Pipeline 載入失敗: {e}", file=sys.stderr, flush=True)
                 print(f"🔄 退回使用 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
-                import traceback
                 traceback.print_exc()
     
     # 標準 faster-whisper + stable-ts
@@ -172,7 +196,6 @@ def init_asr_model():
             return model
         except Exception as e:
             print(f"⚠️ {device}/{compute_type} 失敗: {e}", file=sys.stderr, flush=True)
-            import traceback
             traceback.print_exc()
             return None
 
@@ -191,9 +214,6 @@ def init_asr_model():
     status = "🚀 GPU" if DEVICE == "cuda" else "⚠️ CPU"
     print(f"✅ {status} 模式 ({fallback_model}): {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
     print(f"✅ stable-ts 模型已就緒", file=sys.stderr, flush=True)
-    
-    # 等待 LLM 測試完成
-    llm_thread.join(timeout=5)
 
 
 def check_voice_activity(audio_array: np.ndarray) -> bool:
@@ -210,62 +230,18 @@ def whisper_asr(audio_array: np.ndarray) -> str:
     try:
         # Kotoba-Whisper (Transformers Pipeline)
         if USING_KOTOBA_PIPELINE:
-            audio_input = {
-                "raw": audio_array,
-                "sampling_rate": SAMPLE_RATE
-            }
+            # 使用預建立的參數字典
+            audio_input = {"raw": audio_array, **_KOTOBA_AUDIO_TEMPLATE}
             
-            result = asr_model(
-                audio_input,
-                chunk_length_s=30,
-                stride_length_s=[4, 2],  # 左右 stride 確保連貫
-                batch_size=1,
-                return_timestamps=True,  # 使用 segment-level timestamps (穩定)
-                ignore_warning=True,
-                generate_kwargs={
-                    "language": "ja",
-                    "task": "transcribe",
-                    "num_beams": 5,
-                    "do_sample": False,
-                    "repetition_penalty": 1.3,
-                    "no_repeat_ngram_size": 4,
-                    "length_penalty": 1.0,
-                    "max_new_tokens": 440,
-                },
-            )
+            result = asr_model(audio_input, **_KOTOBA_PIPELINE_KWARGS)
             
-            # 提取文字
-            text = ""
+            # 提取文字（優化判斷）
             if isinstance(result, dict):
-                text = result.get("text", "")
-            else:
-                text = str(result)
-            
-            return text.strip()
+                return result.get("text", "").strip()
+            return str(result).strip()
         
-        # 標準 faster-whisper + stable-ts
-        result = asr_model.transcribe(
-            audio_array,
-            language=SOURCE_LANG_CODE,
-            beam_size=5,
-            best_of=5,
-            patience=1.2,
-            temperature=[0.0, 0.2],
-            compression_ratio_threshold=2.0,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.5,
-            log_prob_threshold=AVG_PROB_THRESHOLD,
-            initial_prompt="",
-            word_timestamps=True,
-            vad=USE_VAD,
-            vad_threshold=VAD_THRESHOLD,
-            suppress_silence=SUPPRESS_SILENCE,
-            suppress_word_ts=True,
-            min_word_dur=0.1,
-            nonspeech_error=0.3,
-            only_voice_freq=ONLY_VOICE_FREQ,
-            regroup=True,
-        )
+        # 標準 faster-whisper + stable-ts（使用預建立參數）
+        result = asr_model.transcribe(audio_array, **_STABLE_TS_KWARGS)
         
         if hasattr(result, 'remove_repetition'):
             result.remove_repetition(max_words=1, verbose=False)
@@ -296,13 +272,12 @@ def whisper_asr(audio_array: np.ndarray) -> str:
                             print(f"⚠️ 跳過單詞重複片段: {seg_text[:30]}...", file=sys.stderr, flush=True)
                             continue
                 
-                # 分級置信度過濾
-                if avg_prob > -0.4 and no_speech < 0.3:
-                    text_parts.append(seg_text)
-                elif avg_prob > -0.7 and no_speech < 0.4 and len(seg_text.strip()) >= 3:
-                    text_parts.append(seg_text)
-                elif avg_prob > -1.0 and no_speech < 0.15 and len(seg_text.strip()) >= 5:
-                    text_parts.append(seg_text)
+                # 分級置信度過濾（使用預定義閾值）
+                seg_text_len = len(seg_text.strip())
+                for prob_min, speech_max, min_len in _CONFIDENCE_THRESHOLDS:
+                    if avg_prob > prob_min and no_speech < speech_max and seg_text_len >= min_len:
+                        text_parts.append(seg_text)
+                        break
         else:
             text_parts = [result.text if hasattr(result, 'text') else str(result)]
         
@@ -311,6 +286,5 @@ def whisper_asr(audio_array: np.ndarray) -> str:
 
     except Exception as e:
         print(f"ASR 錯誤: {e}", file=sys.stderr, flush=True)
-        import traceback
         traceback.print_exc()
         return ""

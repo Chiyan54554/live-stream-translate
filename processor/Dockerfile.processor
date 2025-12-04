@@ -8,6 +8,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/root/.cache/huggingface
 ENV MODEL_CACHE_DIR=/root/.cache/huggingface/hub
+# 🚀 啟用 pip 快取
+ENV PIP_CACHE_DIR=/root/.cache/pip
 
 # 安裝必要套件
 RUN apt-get update && apt-get install -y \
@@ -16,16 +18,17 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 建立快取目錄
-RUN mkdir -p /root/.cache/huggingface/hub
+RUN mkdir -p /root/.cache/huggingface/hub /root/.cache/pip
 
 # 設定工作目錄
 WORKDIR /app
 
-# 複製 requirements
+# 複製 requirements（分離以利快取）
 COPY processor/requirements.txt .
 
-# 🌟 關鍵：安裝 CTranslate2 相容的 cuDNN 9.1.x
-RUN pip install --no-cache-dir nvidia-cudnn-cu12==9.1.0.70
+# 🚀 使用 BuildKit 快取掛載，pip 套件只下載一次
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 # 🌟 建立符號連結，讓 CTranslate2 找到 cuDNN
 RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib && \
@@ -33,21 +36,6 @@ RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])
     ls -la $CUDNN_PATH && \
     mkdir -p /usr/local/lib/ctranslate2 && \
     ln -sf $CUDNN_PATH/libcudnn*.so* /usr/local/lib/ctranslate2/
-
-# 安裝其他依賴 (使用 aiohttp 異步連接 Ollama LLM)
-RUN pip install --no-cache-dir \
-    ctranslate2>=4.5.0 \
-    faster-whisper>=1.1.0 \
-    stable-ts>=2.16.0 \
-    requests>=2.31.0 \
-    aiohttp>=3.9.0 \
-    redis>=5.0.0 \
-    numpy>=1.24.0 \
-    opencc-python-reimplemented>=0.1.7 \
-    # 🎯 Kotoba-Whisper v2.1 支援 (Transformers Pipeline)
-    transformers>=4.39.0 \
-    accelerate>=0.20.0 \
-    punctuators==0.0.5
 
 # 複製程式碼和資源檔案
 COPY processor/__init__.py .

@@ -308,6 +308,7 @@
     </div>
 
     <script>
+        // 🎯 快取 DOM 元素引用 (避免重複查詢)
         const messagesContainer = document.getElementById('messages');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
@@ -317,23 +318,44 @@
         const emptyState = document.getElementById('emptyState');
         const msgLimitSelect = document.getElementById('msgLimit');
 
+        // 🎯 狀態變數
         let autoScroll = true;
         let messageCount = 0;
         let maxMessages = 50;
         let ws = null;
+        
+        // 🎯 預建立的 HTML 轉義對照表 (O(1) 查找)
+        const HTML_ESCAPE_MAP = Object.freeze({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        });
+        // 🎯 預編譯的正則表達式
+        const HTML_ESCAPE_RE = /[&<>"']/g;
+        
+        // 🎯 預建立的 WebSocket URL
+        const WS_URL = `ws://${window.location.hostname}:8080`;
+        
+        // 🎯 預建立的類名常數
+        const CLASS_CONNECTED = 'connected';
+        const CLASS_MESSAGE = 'message';
+        const CLASS_COPIED = 'copied';
 
         function connect() {
-            ws = new WebSocket(`ws://${window.location.hostname}:8080`);
+            ws = new WebSocket(WS_URL);
             ws.onopen = () => {
-                statusDot.classList.add('connected');
+                statusDot.classList.add(CLASS_CONNECTED);
                 statusText.textContent = '已連線';
             };
             ws.onclose = () => {
-                statusDot.classList.remove('connected');
+                statusDot.classList.remove(CLASS_CONNECTED);
                 statusText.textContent = '重新連線中...';
                 setTimeout(connect, 3000);
             };
             ws.onmessage = (event) => {
+                // 🎯 直接解析，錯誤時靜默失敗
                 try {
                     addMessage(JSON.parse(event.data));
                 } catch (e) {}
@@ -341,58 +363,90 @@
         }
 
         function addMessage(data) {
-            // 隱藏空狀態
-            if (emptyState) {
+            // 隱藏空狀態 (只執行一次)
+            if (emptyState && emptyState.style.display !== 'none') {
                 emptyState.style.display = 'none';
             }
 
+            // 🎯 使用 DocumentFragment 減少重排
             const div = document.createElement('div');
-            div.className = 'message';
-            div.innerHTML = `
-                <span class="timestamp">${data.timestamp || new Date().toLocaleTimeString()}</span>
-                <span class="translation">${escapeHtml(data.translation)}</span>
-                <button class="copy-btn" onclick="copyText(this, '${escapeHtml(data.translation)}')">複製</button>
-            `;
+            div.className = CLASS_MESSAGE;
+            
+            // 🎯 預先轉義文字，避免重複調用
+            const escapedTranslation = escapeHtml(data.translation);
+            const timestamp = data.timestamp || new Date().toLocaleTimeString();
+            
+            div.innerHTML = `<span class="timestamp">${timestamp}</span><span class="translation">${escapedTranslation}</span><button class="copy-btn" data-text="${escapedTranslation}">複製</button>`;
+            
             messagesContainer.appendChild(div);
             messageCount++;
             msgCount.textContent = messageCount;
-            trimMessages();
-            if (autoScroll) messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            
+            // 🎯 延遲修剪，避免阻塞渲染
+            if (maxMessages > 0 && messageCount > maxMessages) {
+                trimMessages();
+            }
+            
+            if (autoScroll) {
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
         }
 
+        // 🎯 高效的 HTML 轉義 (使用預建立的對照表)
         function escapeHtml(text) {
             if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            return text.replace(HTML_ESCAPE_RE, char => HTML_ESCAPE_MAP[char]);
         }
 
-        function copyText(btn, text) {
-            navigator.clipboard.writeText(text).then(() => {
-                btn.textContent = '已複製';
-                btn.classList.add('copied');
-                setTimeout(() => { btn.textContent = '複製'; btn.classList.remove('copied'); }, 1500);
-            });
-        }
+        // 🎯 使用事件委派處理複製按鈕 (避免為每個按鈕添加監聽器)
+        messagesContainer.addEventListener('click', (e) => {
+            const btn = e.target;
+            if (btn.classList.contains('copy-btn')) {
+                const text = btn.dataset.text;
+                navigator.clipboard.writeText(text).then(() => {
+                    btn.textContent = '已複製';
+                    btn.classList.add(CLASS_COPIED);
+                    setTimeout(() => {
+                        btn.textContent = '複製';
+                        btn.classList.remove(CLASS_COPIED);
+                    }, 1500);
+                });
+            }
+        });
 
+        // 🎯 優化的訊息修剪 (批次移除)
         function trimMessages() {
             if (maxMessages === 0) return;
-            while (messagesContainer.querySelectorAll('.message').length > maxMessages) {
-                const m = messagesContainer.querySelector('.message');
-                if (m) m.remove();
+            const messages = messagesContainer.getElementsByClassName(CLASS_MESSAGE);
+            const excess = messages.length - maxMessages;
+            if (excess > 0) {
+                // 🎯 使用 requestAnimationFrame 避免阻塞
+                requestAnimationFrame(() => {
+                    for (let i = 0; i < excess; i++) {
+                        if (messages[0]) messages[0].remove();
+                    }
+                    messageCount = messages.length;
+                    msgCount.textContent = messageCount;
+                });
             }
-            messageCount = messagesContainer.querySelectorAll('.message').length;
-            msgCount.textContent = messageCount;
         }
 
-        msgLimitSelect.addEventListener('change', (e) => { maxMessages = parseInt(e.target.value); trimMessages(); });
+        // 🎯 事件監聽器
+        msgLimitSelect.addEventListener('change', (e) => {
+            maxMessages = parseInt(e.target.value, 10);
+            trimMessages();
+        });
+        
         toggleScrollBtn.addEventListener('click', () => {
             autoScroll = !autoScroll;
             toggleScrollBtn.textContent = `📜 自動滾動: ${autoScroll ? '開' : '關'}`;
         });
+        
         clearBtn.addEventListener('click', () => {
-            messagesContainer.querySelectorAll('.message').forEach(m => m.remove());
-            emptyState.style.display = 'block';
+            // 🎯 使用 innerHTML 清空比迭代 remove 更快
+            const empty = emptyState.outerHTML;
+            messagesContainer.innerHTML = empty;
+            // 重新獲取空狀態元素引用
             messageCount = 0;
             msgCount.textContent = '0';
         });

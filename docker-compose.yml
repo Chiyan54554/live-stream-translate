@@ -45,14 +45,13 @@ services:
     volumes:
       - ollama_models:/root/.ollama
     
-    # 健康檢查 - 等待模型下載完成
-    # 🎯 首次啟動可能需要較長時間下載模型 (~5GB)
+    # 🚀 快速健康檢查：只確認服務啟動，不等待模型
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q qwen3 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 60
-      start_period: 300s
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
     
     restart: always
 
@@ -92,12 +91,12 @@ services:
     volumes:
       - huggingface_cache:/root/.cache/huggingface
     
-    # 等待 Ollama 服務就緒
+    # 🚀 只等待 Redis，Ollama 會在背景載入
     depends_on:
       redis:
         condition: service_healthy
       ollama:
-        condition: service_healthy
+        condition: service_started
 
     restart: always
       
@@ -124,4 +123,5 @@ volumes:
   huggingface_cache:
     driver: local
   ollama_models:
-    driver: local
+    external: true
+    name: live-stream-translate_ollama_models
