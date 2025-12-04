@@ -14,9 +14,9 @@ SOURCE_LANG_CODE = "ja"
 TARGET_LANG_CODE = "zh-TW"
 
 # === 緩衝與品質設定 ===
-BUFFER_DURATION_S = 3.0       # 3 秒緩衝，提升 ASR 品質
-OVERLAP_DURATION_S = 0.5      # 適度重疊確保連貫性
-MIN_AUDIO_ENERGY = 0.005      # 稍低門檻，捕捉更多語音
+BUFFER_DURATION_S = 5.0       # 5 秒緩衝，讓 ASR 有更多上下文
+OVERLAP_DURATION_S = 1.5      # 增加重疊確保語句連貫
+MIN_AUDIO_ENERGY = 0.002      # 較低門檻，捕捉輕聲語音
 
 # === Redis 設定 ===
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
@@ -46,12 +46,12 @@ LLM_TIMEOUT = 10  # 翻譯超時秒數
 # === stable-ts 與 VAD 設定 ===
 USE_STABLE_TS = True
 USE_VAD = True
-VAD_THRESHOLD = 0.45
+VAD_THRESHOLD = 0.40          # 稍低閾值，減少漏檢
 SUPPRESS_SILENCE = True
 HALLUCINATION_SILENCE_TH = 1.5
-AVG_PROB_THRESHOLD = -0.7
-MAX_INSTANT_WORDS = 0.30
-ONLY_VOICE_FREQ = False
+AVG_PROB_THRESHOLD = -0.6     # 更嚴格的置信度過濾
+MAX_INSTANT_WORDS = 0.25      # 更嚴格過濾瞬時詞幻覺
+ONLY_VOICE_FREQ = True        # 聚焦人聲頻率範圍
 
 # === 發布控制設定 ===
 MIN_PUBLISH_INTERVAL = 0.5

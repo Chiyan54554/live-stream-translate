@@ -64,23 +64,40 @@ def init_asr_model():
     import torch
     import stable_whisper
     import requests
+    import threading
     from config import LLM_API_URL, LLM_MODEL
     
-    # 測試 LLM 連線
-    try:
-        test_resp = requests.post(
-            LLM_API_URL,
-            json={"model": LLM_MODEL, "prompt": "test", "stream": False},
-            timeout=30
-        )
-        if test_resp.status_code == 200:
-            print(f"✅ LLM 翻譯引擎就緒 ({LLM_MODEL})", file=sys.stderr, flush=True)
-        else:
-            print(f"⚠️ LLM 回應異常: {test_resp.status_code}", file=sys.stderr, flush=True)
-    except requests.exceptions.ConnectionError:
-        print(f"⚠️ 無法連接 Ollama ({LLM_API_URL})，翻譯功能可能無法使用", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"⚠️ LLM 測試失敗: {e}", file=sys.stderr, flush=True)
+    # 並行測試 LLM 連線並預熱模型
+    def test_llm_async():
+        import time as _time
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                print(f"🔄 等待 LLM 模型載入... ({attempt + 1}/{max_retries})", file=sys.stderr, flush=True)
+                test_resp = requests.post(
+                    LLM_API_URL,
+                    json={"model": LLM_MODEL, "prompt": "測試", "stream": False, "think": False},
+                    timeout=60  # 首次載入需要較長時間
+                )
+                if test_resp.status_code == 200:
+                    print(f"✅ LLM 翻譯引擎就緒 ({LLM_MODEL})", file=sys.stderr, flush=True)
+                    return
+                else:
+                    print(f"⚠️ LLM 回應異常: {test_resp.status_code}", file=sys.stderr, flush=True)
+            except requests.exceptions.Timeout:
+                print(f"⚠️ LLM 載入中，等待...", file=sys.stderr, flush=True)
+                _time.sleep(2)
+            except requests.exceptions.ConnectionError:
+                print(f"⚠️ Ollama 尚未就緒，等待...", file=sys.stderr, flush=True)
+                _time.sleep(2)
+            except Exception as e:
+                print(f"⚠️ LLM 測試失敗: {e}", file=sys.stderr, flush=True)
+                _time.sleep(2)
+        print(f"⚠️ LLM 預熱失敗，翻譯可能延遲", file=sys.stderr, flush=True)
+    
+    # 啟動 LLM 測試（非阻塞）
+    llm_thread = threading.Thread(target=test_llm_async, daemon=True)
+    llm_thread.start()
 
     start = time.time()
     
@@ -91,14 +108,21 @@ def init_asr_model():
             print(f"🔄 自動切換到 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
         else:
             try:
-                from transformers import pipeline as hf_pipeline
+                from transformers import pipeline as hf_pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
                 
                 model_version = "v2.2" if "v2.2" in ASR_MODEL_NAME else "v2.1"
                 print(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper {model_version}...", file=sys.stderr, flush=True)
                 
                 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
                 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-                model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {}
+                
+                # 只使用 model_kwargs，不在 pipeline 中重複設定 torch_dtype
+                model_kwargs = {
+                    "attn_implementation": "sdpa",
+                    "low_cpu_mem_usage": True,
+                } if torch.cuda.is_available() else {
+                    "low_cpu_mem_usage": True,
+                }
                 
                 asr_model = hf_pipeline(
                     "automatic-speech-recognition",
@@ -116,6 +140,9 @@ def init_asr_model():
                 
                 print(f"✅ Kotoba-Whisper {model_version} 已就緒 (Transformers)", file=sys.stderr, flush=True)
                 print(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
+                
+                # 等待 LLM 測試完成
+                llm_thread.join(timeout=5)
                 return
                 
             except Exception as e:
@@ -141,14 +168,7 @@ def init_asr_model():
                 num_workers=2,
             )
             
-            warmup_audio = np.zeros(16000, dtype=np.float32)
-            _ = model.transcribe(
-                warmup_audio,
-                language="ja",
-                vad=False,
-                suppress_silence=False,
-            )
-            
+            # 移除預熱步驟以加速載入（首次推理會稍慢但可接受）
             return model
         except Exception as e:
             print(f"⚠️ {device}/{compute_type} 失敗: {e}", file=sys.stderr, flush=True)
@@ -171,6 +191,9 @@ def init_asr_model():
     status = "🚀 GPU" if DEVICE == "cuda" else "⚠️ CPU"
     print(f"✅ {status} 模式 ({fallback_model}): {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
     print(f"✅ stable-ts 模型已就緒", file=sys.stderr, flush=True)
+    
+    # 等待 LLM 測試完成
+    llm_thread.join(timeout=5)
 
 
 def check_voice_activity(audio_array: np.ndarray) -> bool:
@@ -194,17 +217,31 @@ def whisper_asr(audio_array: np.ndarray) -> str:
             
             result = asr_model(
                 audio_input,
-                chunk_length_s=15,
-                return_timestamps=True,
+                chunk_length_s=30,
+                stride_length_s=[4, 2],  # 左右 stride 確保連貫
+                batch_size=1,
+                return_timestamps=True,  # 使用 segment-level timestamps (穩定)
+                ignore_warning=True,
                 generate_kwargs={
                     "language": "ja",
                     "task": "transcribe",
+                    "num_beams": 5,
+                    "do_sample": False,
+                    "repetition_penalty": 1.3,
+                    "no_repeat_ngram_size": 4,
+                    "length_penalty": 1.0,
+                    "max_new_tokens": 440,
                 },
-                ignore_warning=True,
             )
             
-            text = result.get("text", "").strip() if isinstance(result, dict) else str(result).strip()
-            return text
+            # 提取文字
+            text = ""
+            if isinstance(result, dict):
+                text = result.get("text", "")
+            else:
+                text = str(result)
+            
+            return text.strip()
         
         # 標準 faster-whisper + stable-ts
         result = asr_model.transcribe(

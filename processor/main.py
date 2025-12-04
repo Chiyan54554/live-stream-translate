@@ -150,6 +150,11 @@ async def process_audio_chunk(audio_data_b64: str, r):
     async def translate_and_prepare_result(text_to_translate):
         """翻譯並準備結果"""
         translation = await llm_translate(text_to_translate, aio_session)
+        
+        # 如果翻譯為空，返回 None 不發布
+        if not translation or not translation.strip():
+            return None
+        
         tz = timezone(timedelta(hours=8))
         return {
             "timestamp": datetime.now(tz).strftime("%H:%M:%S"),
@@ -177,20 +182,28 @@ async def main():
     """主循環"""
     global aio_session
     
+    import concurrent.futures
+    
     # 設定環境
     setup_environment()
     
     # 印出配置
     print_config()
     
-    # 初始化 ASR
-    init_asr_model()
-    
-    # 建立異步 HTTP session
+    # 建立異步 HTTP session（提前建立）
     aio_session = aiohttp.ClientSession()
     
+    # 建立執行緒池
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    
+    # 並行初始化：ASR 模型載入 + Redis 連線
+    loop = asyncio.get_event_loop()
+    
+    # 在背景執行 ASR 初始化
+    asr_future = loop.run_in_executor(executor, init_asr_model)
+    
+    # 同時連接 Redis
     try:
-        # 使用異步 Redis
         r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
         await r.ping()
         print(f"✅ Redis 連線成功 (異步模式)", file=sys.stderr, flush=True)
@@ -198,6 +211,10 @@ async def main():
         print(f"❌ Redis 連線失敗: {e}", file=sys.stderr, flush=True)
         await aio_session.close()
         sys.exit(1)
+    
+    # 等待 ASR 初始化完成
+    await asr_future
+    executor.shutdown(wait=False)
 
     p = r.pubsub()
     await p.subscribe(AUDIO_CHANNEL)

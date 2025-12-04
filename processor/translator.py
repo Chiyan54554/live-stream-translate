@@ -7,7 +7,7 @@ import asyncio
 import aiohttp
 
 from config import LLM_API_URL, LLM_MODEL, LLM_TIMEOUT
-from text_utils import remove_inline_repetition, filter_translated_repetition
+from text_utils import remove_inline_repetition, filter_translated_repetition, clean_gibberish_from_translation
 
 # === OpenCC 簡繁轉換器 ===
 try:
@@ -97,12 +97,47 @@ def clean_llm_output(text: str) -> str:
         text = re.sub(r'[а-яА-ЯёЁ]+', '', text)
         print(f"⚠️ 移除俄文字符", file=sys.stderr, flush=True)
     
-    # 3. 過濾未翻譯日文
+    # 2.5 移除阿拉伯文、希伯來文、泰文、韓文等非目標語言
+    if re.search(r'[\u0600-\u06FF\u0590-\u05FF\u0E00-\u0E7F\u0900-\u097F\uAC00-\uD7AF]', text):
+        text = re.sub(r'[\u0600-\u06FF\u0590-\u05FF\u0E00-\u0E7F\u0900-\u097F\uAC00-\uD7AF]+', '', text)
+        print(f"⚠️ 移除非目標語言字符", file=sys.stderr, flush=True)
+    
+    # 2.6 移除注音符號（ㄅ-ㄩ）
+    if re.search(r'[\u3100-\u312F]', text):
+        text = re.sub(r'[\u3100-\u312F]+', '', text)
+        print(f"⚠️ 移除注音符號", file=sys.stderr, flush=True)
+    
+    # 2.7 移除句尾的孤立數字
+    text = re.sub(r'[\s]*[0-9]+[\s]*$', '', text)
+    
+    # 3. 移除殘留的日文假名（翻譯結果不應包含大量假名）
+    # 先計算比例
     hiragana_katakana = len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF]', text))
     chinese_chars = len(re.findall(r'[\u4E00-\u9FFF]', text))
+    
+    # 如果假名佔多數，過濾整句
     if hiragana_katakana > chinese_chars and hiragana_katakana > 5:
         print(f"⚠️ 過濾未翻譯日文: {text[:40]}", file=sys.stderr, flush=True)
         return ""
+    
+    # 移除夾雜的日文片段（平假名+片假名混合）
+    # 匹配連續的假名片段（包含平假名和片假名）
+    def clean_japanese_fragment(match):
+        fragment = match.group(0)
+        # 如果是很短的片段（可能是語氣詞），保留
+        if len(fragment) <= 2:
+            return fragment
+        print(f"⚠️ 移除日文片段: {fragment}", file=sys.stderr, flush=True)
+        return ''
+    
+    # 移除連續3個以上的假名（平假名或片假名）
+    text = re.sub(r'[\u3040-\u309F\u30A0-\u30FF]{3,}', clean_japanese_fragment, text)
+    
+    # 移除混合的日文片段（如：早い？愛か？）
+    # 匹配: 漢字+假名+標點 的組合
+    text = re.sub(r'[\u4E00-\u9FFF][\u3040-\u309F\u30A0-\u30FF]+[？！。]?', 
+                  lambda m: '' if len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF]', m.group(0))) >= 2 else m.group(0), 
+                  text)
     
     # 4. 過濾純英文
     if re.match(r'^[a-zA-Z_\s]+$', text.strip()) and len(text) > 5:
@@ -189,56 +224,83 @@ async def llm_translate(text: str, session: aiohttp.ClientSession) -> str:
     if not text:
         return ""
     
-    prompt = f"""你是專業的日文即時直播翻譯員。將以下日文翻譯成自然流暢的繁體中文（台灣用語）。
+    prompt = f"""你是專業的日文遊戲直播即時翻譯員。請將以下日文準確翻譯成繁體中文（台灣用語）。
 
-規則：
-- 只輸出翻譯結果
-- 保持口語化語氣
-- 人名音譯保留日文發音
-- 無意義輸入回覆空白
+翻譯規則：
+1. 只輸出翻譯結果，不要解釋或註解
+2. 保持口語化、自然的語氣
+3. 人名音譯：用常見中文譯法（如ヒロ→阿廣、タケシ→阿武、さん→桑/先生）
+4. 遊戲術語：使用台灣玩家慣用譯法
+5. 片假名外來語：翻成中文意思，不要音譯
+6. 語氣詞保留自然感（如：啊、呢、啦、欸）
+7. 聽不清或無意義的輸入，回覆空白
 
 日文：{text}
-翻譯："""
+中文："""
     
-    try:
-        async with session.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "think": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9,
-                    "top_k": 40,
-                    "num_predict": 200,
-                    "repeat_penalty": 1.1,
-                    "stop": ["\n\n", "日文：", "日文原文", "翻譯："]
-                }
-            },
-            timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT)
-        ) as response:
-            if response.status == 200:
-                result = await response.json()
-                translated = result.get('response', '').strip()
-                
-                translated = clean_llm_output(translated)
-                
-                if translated:
-                    translated = filter_translated_repetition(translated)
-                
-                return translated
-            else:
-                print(f"LLM 翻譯失敗: HTTP {response.status}", file=sys.stderr, flush=True)
-                return ""
-                
-    except asyncio.TimeoutError:
-        print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
-        return ""
-    except aiohttp.ClientError as e:
-        print(f"無法連接 LLM 服務: {e}", file=sys.stderr, flush=True)
-        return ""
-    except Exception as e:
-        print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
-        return ""
+    max_retries = 2
+    retry_timeout = LLM_TIMEOUT
+    
+    for attempt in range(max_retries + 1):
+        try:
+            # 首次嘗試給予更長超時（模型可能還在載入）
+            current_timeout = retry_timeout * 3 if attempt == 0 else retry_timeout
+            
+            async with session.post(
+                LLM_API_URL,
+                json={
+                    "model": LLM_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": 0.2,
+                        "top_p": 0.85,
+                        "top_k": 30,
+                        "num_predict": 256,
+                        "repeat_penalty": 1.15,
+                        "stop": ["\n\n", "日文：", "日文原文", "中文：", "翻譯："]
+                    }
+                },
+                timeout=aiohttp.ClientTimeout(total=current_timeout)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    translated = result.get('response', '').strip()
+                    
+                    translated = clean_llm_output(translated)
+                    
+                    if translated:
+                        translated = filter_translated_repetition(translated)
+                    
+                    # 過濾無意義音譯串
+                    if translated:
+                        translated = clean_gibberish_from_translation(translated)
+                    
+                    return translated
+                else:
+                    print(f"LLM 翻譯失敗: HTTP {response.status}", file=sys.stderr, flush=True)
+                    if attempt < max_retries:
+                        await asyncio.sleep(0.5)
+                        continue
+                    return ""
+                    
+        except asyncio.TimeoutError:
+            if attempt < max_retries:
+                print(f"LLM 超時，重試 ({attempt + 1}/{max_retries})...", file=sys.stderr, flush=True)
+                await asyncio.sleep(0.5)
+                continue
+            print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
+            return ""
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                print(f"LLM 連線失敗，重試 ({attempt + 1}/{max_retries})...", file=sys.stderr, flush=True)
+                await asyncio.sleep(1)
+                continue
+            print(f"無法連接 LLM 服務: {e}", file=sys.stderr, flush=True)
+            return ""
+        except Exception as e:
+            print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
+            return ""
+    
+    return ""

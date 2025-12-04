@@ -46,6 +46,33 @@ def remove_inline_repetition(text: str) -> str:
     
     original = text
     
+    # 方法 0: 偵測連續相似詞（如：右面右面右側右側右邊）
+    # 找出連續的同義詞重複
+    similar_groups = [
+        ['右邊', '右側', '右面'],
+        ['左邊', '左側', '左面'],
+        ['上面', '上邊', '上方'],
+        ['下面', '下邊', '下方'],
+        ['前面', '前邊', '前方'],
+        ['後面', '後邊', '後方'],
+        ['這邊', '這裡', '這兒'],
+        ['那邊', '那裡', '那兒'],
+    ]
+    
+    for group in similar_groups:
+        # 建立正則來匹配連續的同義詞
+        pattern = '(' + '|'.join(re.escape(w) for w in group) + ')'
+        matches = list(re.finditer(pattern, text))
+        if len(matches) >= 3:
+            # 保留第一個，移除後續的連續重複
+            first_word = matches[0].group(0)
+            # 移除連續出現的同義詞（保留第一個）
+            result = re.sub(f'({pattern}){{2,}}', first_word, text)
+            if result != text:
+                print(f"🔧 移除同義詞重複: {text[:40]} -> {result[:40]}", file=sys.stderr, flush=True)
+                text = result
+                original = result
+    
     # 方法 1: 偵測完全相同的連續重複
     for pattern_len in range(min(25, len(text) // 2), 3, -1):
         for start in range(len(text) - pattern_len * 2 + 1):
@@ -466,3 +493,75 @@ def extract_new_content(current: str, previous: str) -> str:
             return ""
     
     return current
+
+
+def detect_gibberish_transliteration(text: str) -> bool:
+    """偵測無意義的音譯串（如重複的音節組合）"""
+    if not text or len(text) < 8:
+        return False
+    
+    # 移除標點符號來分析
+    clean_text = re.sub(r'[，。！？、～~\s]+', '', text)
+    if len(clean_text) < 6:
+        return False
+    
+    # 常見無意義音譯特徵：
+    # 1. 相同音節重複多次（如：巴託巴託巴託）
+    for syllable_len in range(2, 5):
+        for start in range(len(clean_text) - syllable_len * 3):
+            syllable = clean_text[start:start + syllable_len]
+            # 檢查是否連續出現3次以上
+            repeated = syllable * 3
+            if repeated in clean_text:
+                # 排除常見有意義的重複（如：哈哈哈、呵呵呵）
+                common_repeats = ['哈', '呵', '嘿', '嗯', '啊', '欸', '喔', '噢', '耶', '唉', '嘻', '笑']
+                if not any(syllable.startswith(c) for c in common_repeats):
+                    return True
+    
+    # 2. 句子主要由音譯詞組成（常見音譯尾字）
+    # 擴展音譯常用字列表
+    transliteration_chars = set(
+        '巴托斯拉達馬卡帕塔瓦薩納拉莫諾洛羅波索佐多科戈伊尼里基米希'
+        '克德特爾布格恩姆師夫吉斯安列文茲許勒蒂娜雅該赫阿卡'
+        '梅泰克尼德吉雷戈菲米森尼克维克卡州'
+    )
+    text_chars = [c for c in clean_text if c not in '的是了在有我你他她它們這那不也就都而且但只要如果因為所以還可以很太真好壞']
+    if text_chars:
+        transliteration_ratio = sum(1 for c in text_chars if c in transliteration_chars) / len(text_chars)
+        # 如果超過50%是音譯常用字，且文字較長，可能是無意義音譯
+        if transliteration_ratio > 0.5 and len(clean_text) > 12:
+            return True
+    
+    return False
+
+
+def clean_gibberish_from_translation(text: str) -> str:
+    """清理翻譯結果中的無意義音譯串"""
+    if not text:
+        return text
+    
+    # 先檢查整句是否為無意義音譯
+    if detect_gibberish_transliteration(text):
+        print(f"⚠️ 過濾無意義音譯: {text[:40]}", file=sys.stderr, flush=True)
+        return ""
+    
+    # 分句處理，移除無意義的部分
+    separators = ['，', '。', '！', '？']
+    for sep in separators:
+        if sep in text:
+            parts = text.split(sep)
+            cleaned_parts = []
+            for part in parts:
+                part = part.strip()
+                if part and not detect_gibberish_transliteration(part):
+                    cleaned_parts.append(part)
+            
+            if len(cleaned_parts) < len([p for p in parts if p.strip()]):
+                result = sep.join(cleaned_parts)
+                if sep in ['。', '！', '？'] and result and not result.endswith(sep):
+                    result += sep
+                if result != text:
+                    print(f"🔧 移除部分無意義音譯: {text[:40]} -> {result[:40]}", file=sys.stderr, flush=True)
+                return result
+    
+    return text
