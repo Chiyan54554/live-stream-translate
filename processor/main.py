@@ -1,6 +1,7 @@
 """
 Live Stream Translate - 日文直播即時翻譯處理器
 主程式入口
+🚀 優化版：預計算常數、減少重複運算
 """
 import sys
 import json
@@ -23,11 +24,26 @@ from config import (
     print_config
 )
 from asr import setup_environment, init_asr_model, whisper_asr
-from translator import llm_translate
+from translator import llm_translate, warmup_llm
 from text_utils import (
     filter_text, calculate_similarity,
     extract_new_content, merge_incomplete_sentence
 )
+
+
+# ============================================================
+# 🚀 預計算常數（避免每次處理重新計算）
+# ============================================================
+
+# 音訊緩衝區大小（單位：bytes）
+TARGET_BUFFER_SIZE = int(BUFFER_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
+OVERLAP_BUFFER_SIZE = int(OVERLAP_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
+
+# 預建立時區物件（避免每次建立）
+TZ_TAIPEI = timezone(timedelta(hours=8))
+
+# 預格式化 duration 字串
+DURATION_STR = f"{BUFFER_DURATION_S:.3f}"
 
 
 # === 全域狀態 ===
@@ -44,25 +60,28 @@ aio_session: aiohttp.ClientSession = None
 
 
 def is_duplicate_or_overlap(text: str) -> bool:
-    """檢查文字是否與最近發布的內容重複或高度重疊"""
+    """檢查文字是否與最近發布的內容重複或高度重疊 - 優化版"""
     global recent_texts, last_transcription
     
-    if not text:
+    # 提前返回：空字串或完全相同
+    if not text or text == last_transcription:
         return True
     
-    if text == last_transcription:
-        return True
+    # 子字串檢查（先檢查較短的）
+    text_len = len(text)
+    last_len = len(last_transcription)
     
-    if text in last_transcription or last_transcription in text:
+    if text_len <= last_len:
         if text in last_transcription:
             return True
+    elif last_transcription in text:
+        pass  # 新文字包含舊文字，可能是擴展，不算重複
     
-    for recent in recent_texts:
-        similarity = calculate_similarity(text, recent)
-        if similarity > SIMILARITY_THRESHOLD:
-            return True
-    
-    return False
+    # 使用 any() 提前終止
+    return any(
+        calculate_similarity(text, recent) > SIMILARITY_THRESHOLD
+        for recent in recent_texts
+    )
 
 
 async def process_audio_chunk(audio_data_b64: str, r):
@@ -88,19 +107,16 @@ async def process_audio_chunk(audio_data_b64: str, r):
     # 恢復重疊機制
     audio_buffer = overlap_buffer + audio_buffer + raw_bytes
     
-    # 計算目標大小
-    target_size = int(BUFFER_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
-    overlap_size = int(OVERLAP_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
-    
-    if len(audio_buffer) < target_size:
+    # 使用預計算的常數
+    if len(audio_buffer) < TARGET_BUFFER_SIZE:
         return
     
     # 取出處理的音訊
-    audio_to_process = audio_buffer[:target_size]
+    audio_to_process = audio_buffer[:TARGET_BUFFER_SIZE]
     
     # 保留重疊部分
-    overlap_buffer = audio_buffer[target_size - overlap_size:target_size]
-    audio_buffer = audio_buffer[target_size:]
+    overlap_buffer = audio_buffer[TARGET_BUFFER_SIZE - OVERLAP_BUFFER_SIZE:TARGET_BUFFER_SIZE]
+    audio_buffer = audio_buffer[TARGET_BUFFER_SIZE:]
     
     # 轉換為 numpy array
     audio_array = np.frombuffer(audio_to_process, dtype=np.int16).astype(np.float32) / 32768.0
@@ -147,15 +163,20 @@ async def process_audio_chunk(audio_data_b64: str, r):
     context_history.append(complete_sentence)
     
     # 並行翻譯
-    async def translate_and_prepare_result(text_to_translate):
-        """翻譯並準備結果"""
+    async def translate_and_prepare_result(text_to_translate: str):
+        """翻譯並準備結果 - 優化版"""
         translation = await llm_translate(text_to_translate, aio_session)
-        tz = timezone(timedelta(hours=8))
+        
+        # 如果翻譯為空，返回 None 不發布
+        if not translation or not translation.strip():
+            return None
+        
+        # 使用預建立的時區和常數
         return {
-            "timestamp": datetime.now(tz).strftime("%H:%M:%S"),
+            "timestamp": datetime.now(TZ_TAIPEI).strftime("%H:%M:%S"),
             "source_lang": SOURCE_LANG_CODE,
             "target_lang": TARGET_LANG_CODE,
-            "duration_s": f"{BUFFER_DURATION_S:.3f}",
+            "duration_s": DURATION_STR,
             "transcription": text_to_translate,
             "translation": translation
         }
@@ -177,20 +198,28 @@ async def main():
     """主循環"""
     global aio_session
     
+    import concurrent.futures
+    
     # 設定環境
     setup_environment()
     
     # 印出配置
     print_config()
     
-    # 初始化 ASR
-    init_asr_model()
-    
-    # 建立異步 HTTP session
+    # 建立異步 HTTP session（提前建立）
     aio_session = aiohttp.ClientSession()
     
+    # 建立執行緒池
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    
+    # 並行初始化：ASR 模型載入 + Redis 連線
+    loop = asyncio.get_event_loop()
+    
+    # 在背景執行 ASR 初始化
+    asr_future = loop.run_in_executor(executor, init_asr_model)
+    
+    # 同時連接 Redis
     try:
-        # 使用異步 Redis
         r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
         await r.ping()
         print(f"✅ Redis 連線成功 (異步模式)", file=sys.stderr, flush=True)
@@ -198,6 +227,13 @@ async def main():
         print(f"❌ Redis 連線失敗: {e}", file=sys.stderr, flush=True)
         await aio_session.close()
         sys.exit(1)
+    
+    # 等待 ASR 初始化完成
+    await asr_future
+    executor.shutdown(wait=False)
+    
+    # 🚀 背景預熱 LLM（不阻塞主流程）
+    asyncio.create_task(warmup_llm())
 
     p = r.pubsub()
     await p.subscribe(AUDIO_CHANNEL)

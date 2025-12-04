@@ -1,13 +1,113 @@
 """
 翻譯模組 - LLM 翻譯與文字轉換
+🚀 優化版：預編譯正則、高效資料結構、減少重複運算
 """
 import re
 import sys
 import asyncio
 import aiohttp
+import time
+import os
 
 from config import LLM_API_URL, LLM_MODEL, LLM_TIMEOUT
-from text_utils import remove_inline_repetition, filter_translated_repetition
+
+# 🚀 全域狀態：追蹤 LLM 是否就緒
+_llm_ready = False
+_llm_warmup_done = False
+
+from text_utils import (
+    remove_inline_repetition, 
+    filter_translated_repetition, 
+    clean_gibberish_from_translation,
+    RE_REPEATED_WORDS,
+    RE_STUTTERING,
+    RE_J_PREFIX_HALLUCINATION
+)
+
+# ============================================================
+# 🚀 預編譯正則表達式（模組載入時只編譯一次）
+# ============================================================
+
+RE_ROMAJI = re.compile(r'^[a-z\s\-\']+$', re.IGNORECASE)
+RE_RUSSIAN = re.compile(r'[а-яА-ЯёЁ]+')
+RE_NON_TARGET_LANG = re.compile(r'[\u0600-\u06FF\u0590-\u05FF\u0E00-\u0E7F\u0900-\u097F\uAC00-\uD7AF]+')
+RE_BOPOMOFO = re.compile(r'[\u3100-\u312F]+')
+RE_TRAILING_DIGITS = re.compile(r'[\s]*[0-9]+[\s]*$')
+RE_HIRAGANA_KATAKANA = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]')
+RE_CHINESE_CHARS = re.compile(r'[\u4E00-\u9FFF]')
+RE_CONSECUTIVE_KANA = re.compile(r'[\u3040-\u309F\u30A0-\u30FF]{3,}')
+RE_KANJI_KANA_PUNCT = re.compile(r'[\u4E00-\u9FFF][\u3040-\u309F\u30A0-\u30FF]+[？！。]?')
+RE_PURE_ENGLISH = re.compile(r'^[a-zA-Z_\s]+$')
+RE_ENGLISH_WORD = re.compile(r'\b[a-zA-Z_]{4,}\b')
+RE_MULTI_SPACE = re.compile(r'\s+')
+RE_MARKDOWN_BOLD = re.compile(r'\*\*(.+?)\*\*')
+RE_MARKDOWN_UNDERLINE = re.compile(r'__(.+?)__')
+RE_MARKDOWN_CODE = re.compile(r'`(.+?)`')
+
+# 🎯 低品質翻譯過濾（語意不通順模式）
+RE_NONSENSE_PATTERN = re.compile(r'(.{1,2})\1{4,}')  # 連續重複 1-2 字 5 次以上
+RE_INCOMPLETE_ENDING = re.compile(r'[的在是了和要]$')  # 不完整結尾
+
+# 符號清理（預編譯列表）
+RE_SYMBOL_CLEANUP = (
+    (re.compile(r'[,\s]*[}\]]\s*'), ''),
+    (re.compile(r'[:\s]*[)\]>]+\s*[?\s]*$'), ''),
+    (re.compile(r'^[,\s]*[{\[]\s*'), ''),
+    (re.compile(r'[!?]*["\';)]+\s*$'), ''),
+    (re.compile(r'["\';(]+\s*[!?]*\s*$'), ''),
+    (re.compile(r'\s*[!]{2,}["\');\s]*$'), ''),
+    (re.compile(r'的["\'\s.。，,]+$'), '的'),
+    (re.compile(r'你這[.\s]*$'), '你這傢伙'),
+    (re.compile(r'[.\s]+$'), ''),
+    (re.compile(r'^[-=_*#]+\s*'), ''),
+    (re.compile(r'\s*[-=_*#]+$'), ''),
+)
+
+# ============================================================
+# 🚀 高效資料結構（frozenset O(1) 查找）
+# ============================================================
+
+ALLOWED_ENGLISH_UPPER = frozenset({
+    'K', 'KO', 'OK', 'COMBO', 'GAUGE', 'GUARD', 'ATTACK', 'WIN',
+    'LOSE', 'HP', 'MP', 'SP', 'BGM', 'NG', 'GG', 'VS', 'DLC',
+    'ONLINE', 'OFFLINE', 'S', 'A', 'B', 'C', 'D'
+})
+
+PREFIXES_TO_REMOVE = (
+    '翻譯：', '翻譯:', '中文：', '中文:', '答：', '答:',
+    '繁體中文：', '繁體中文:', '譯文：', '譯文:', '回答：', '回答:'
+)
+
+QUOTE_PAIRS = (
+    ('"', '"'), ('「', '」'), ('『', '』'), ("'", "'"),
+)
+
+# ============================================================
+# 🚀 轉換表載入與預處理
+# ============================================================
+
+def _load_mapping(filename: str, description: str) -> dict:
+    """從檔案載入映射表"""
+    mapping = {}
+    txt_path = os.path.join(os.path.dirname(__file__), 'mappings', filename)
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        key, value = parts[0].strip(), parts[1].strip()
+                        if key and value:
+                            mapping[key] = value
+        print(f"✅ 載入{description}: {len(mapping)} 組", file=sys.stderr, flush=True)
+    except FileNotFoundError:
+        print(f"⚠️ 找不到{description}: {txt_path}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"⚠️ 載入{description}失敗: {e}", file=sys.stderr, flush=True)
+    return mapping
 
 # === OpenCC 簡繁轉換器 ===
 try:
@@ -18,170 +118,252 @@ except ImportError:
     OPENCC_CONVERTER = None
     print(f"⚠️ OpenCC 未安裝，將使用備用 txt 字典", file=sys.stderr, flush=True)
 
+# 載入並預排序轉換表（只排序一次）
+_s2t_raw = _load_mapping('simplified_to_traditional.txt', '簡繁轉換表') if not OPENCC_CONVERTER else {}
+_c2t_raw = _load_mapping('china_to_taiwan.txt', '中台用語表')
 
-def load_simplified_to_traditional() -> dict:
-    """從外部 txt 檔案載入簡繁轉換表（備用）"""
-    import os
-    mapping = {}
-    txt_path = os.path.join(os.path.dirname(__file__), 'mappings', 'simplified_to_traditional.txt')
+SIMPLIFIED_TO_TRADITIONAL_SORTED = tuple(
+    sorted(_s2t_raw.items(), key=lambda x: len(x[0]), reverse=True)
+) if _s2t_raw else ()
+
+CHINA_TO_TAIWAN_SORTED = tuple(
+    sorted(_c2t_raw.items(), key=lambda x: len(x[0]), reverse=True)
+)
+
+
+async def warmup_llm():
+    """🚀 非阻塞 LLM 預熱 - 背景等待 Ollama 就緒"""
+    global _llm_ready, _llm_warmup_done
     
-    try:
-        with open(txt_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '=' in line:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2:
-                        simp, trad = parts[0].strip(), parts[1].strip()
-                        if simp and trad:
-                            mapping[simp] = trad
-        if not OPENCC_CONVERTER:
-            print(f"✅ 載入備用簡繁轉換表: {len(mapping)} 組", file=sys.stderr, flush=True)
-    except FileNotFoundError:
-        if not OPENCC_CONVERTER:
-            print(f"⚠️ 找不到簡繁轉換表: {txt_path}", file=sys.stderr, flush=True)
-    except Exception as e:
-        if not OPENCC_CONVERTER:
-            print(f"⚠️ 載入簡繁轉換表失敗: {e}", file=sys.stderr, flush=True)
+    if _llm_warmup_done:
+        return _llm_ready
     
-    return mapping
-
-
-def load_china_to_taiwan() -> dict:
-    """從外部 txt 檔案載入中國用語轉台灣用語表"""
-    import os
-    mapping = {}
-    txt_path = os.path.join(os.path.dirname(__file__), 'mappings', 'china_to_taiwan.txt')
+    print("🔄 背景等待 Ollama 模型載入...", file=sys.stderr, flush=True)
+    start_time = time.time()
+    max_wait = 300  # 最多等待 5 分鐘（首次載入模型到 GPU 需要時間）
     
-    try:
-        with open(txt_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '=' in line:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2:
-                        china, taiwan = parts[0].strip(), parts[1].strip()
-                        if china and taiwan:
-                            mapping[china] = taiwan
-        print(f"✅ 載入中台用語表: {len(mapping)} 組", file=sys.stderr, flush=True)
-    except FileNotFoundError:
-        print(f"⚠️ 找不到中台用語表: {txt_path}", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"⚠️ 載入中台用語表失敗: {e}", file=sys.stderr, flush=True)
-    
-    return mapping
+    async with aiohttp.ClientSession() as session:
+        while time.time() - start_time < max_wait:
+            try:
+                # 🚀 首次請求需要 60 秒以上（模型載入到 GPU）
+                async with session.post(
+                    LLM_API_URL,
+                    json={
+                        "model": LLM_MODEL,
+                        "prompt": "你好",
+                        "stream": False,
+                        "think": False,
+                        "options": {"num_predict": 5}
+                    },
+                    timeout=aiohttp.ClientTimeout(total=120)  # 120 秒超時
+                ) as response:
+                    if response.status == 200:
+                        elapsed = time.time() - start_time
+                        print(f"✅ LLM 就緒！(載入耗時 {elapsed:.1f}s)", file=sys.stderr, flush=True)
+                        _llm_ready = True
+                        _llm_warmup_done = True
+                        return True
+                    elif response.status == 499:
+                        # 499 = 請求被取消（模型正在載入）
+                        print(f"⏳ 模型載入中... ({time.time() - start_time:.0f}s)", file=sys.stderr, flush=True)
+                        await asyncio.sleep(5)
+                    else:
+                        print(f"⚠️ LLM 回應: {response.status}", file=sys.stderr, flush=True)
+                        await asyncio.sleep(5)
+            except asyncio.TimeoutError:
+                print(f"⏳ 等待模型載入... ({time.time() - start_time:.0f}s)", file=sys.stderr, flush=True)
+                await asyncio.sleep(3)
+            except aiohttp.ClientError:
+                # Ollama 服務還沒啟動
+                await asyncio.sleep(3)
+            except Exception as e:
+                print(f"⚠️ 預熱錯誤: {e}", file=sys.stderr, flush=True)
+                await asyncio.sleep(5)
+        
+        print("⚠️ LLM 預熱超時，翻譯功能可能受影響", file=sys.stderr, flush=True)
+        _llm_warmup_done = True
+        # 即使超時也標記為就緒，讓翻譯可以嘗試
+        _llm_ready = True
+        return False
 
 
-# 全域轉換表
-SIMPLIFIED_TO_TRADITIONAL = load_simplified_to_traditional()
-CHINA_TO_TAIWAN = load_china_to_taiwan()
+def is_llm_ready() -> bool:
+    """檢查 LLM 是否已就緒"""
+    return _llm_ready
+
+
+# ============================================================
+# 🚀 優化版清理函數
+# ============================================================
+
+def _clean_english_word(match) -> str:
+    """清理英文詞（O(1) frozenset 查找）"""
+    word = match.group(0)
+    if word.upper() in ALLOWED_ENGLISH_UPPER or len(word) <= 2:
+        return word
+    return ''
 
 
 def clean_llm_output(text: str) -> str:
-    """清理 LLM 輸出的各種問題"""
+    """清理 LLM 輸出 - 優化版（預編譯正則 + 高效資料結構）"""
     if not text:
         return ""
     
+    text_stripped = text.strip()
+    
     # 1. 過濾羅馬拼音
-    romaji_pattern = re.compile(r'^[a-z\s\-\']+$', re.IGNORECASE)
-    if romaji_pattern.match(text.strip()) and len(text) > 10:
+    if RE_ROMAJI.match(text_stripped) and len(text) > 10:
         print(f"⚠️ 過濾羅馬拼音: {text[:40]}", file=sys.stderr, flush=True)
         return ""
     
-    # 2. 移除俄文字符
-    if re.search(r'[а-яА-ЯёЁ]', text):
-        text = re.sub(r'[а-яА-ЯёЁ]+', '', text)
+    # 2. 移除非目標語言字符
+    if RE_RUSSIAN.search(text):
+        text = RE_RUSSIAN.sub('', text)
         print(f"⚠️ 移除俄文字符", file=sys.stderr, flush=True)
     
-    # 3. 過濾未翻譯日文
-    hiragana_katakana = len(re.findall(r'[\u3040-\u309F\u30A0-\u30FF]', text))
-    chinese_chars = len(re.findall(r'[\u4E00-\u9FFF]', text))
+    if RE_NON_TARGET_LANG.search(text):
+        text = RE_NON_TARGET_LANG.sub('', text)
+        print(f"⚠️ 移除非目標語言字符", file=sys.stderr, flush=True)
+    
+    if RE_BOPOMOFO.search(text):
+        text = RE_BOPOMOFO.sub('', text)
+        print(f"⚠️ 移除注音符號", file=sys.stderr, flush=True)
+    
+    text = RE_TRAILING_DIGITS.sub('', text)
+    
+    # 3. 日文假名過濾
+    hiragana_katakana = len(RE_HIRAGANA_KATAKANA.findall(text))
+    chinese_chars = len(RE_CHINESE_CHARS.findall(text))
+    
     if hiragana_katakana > chinese_chars and hiragana_katakana > 5:
         print(f"⚠️ 過濾未翻譯日文: {text[:40]}", file=sys.stderr, flush=True)
         return ""
     
+    def _clean_kana_fragment(match):
+        fragment = match.group(0)
+        if len(fragment) <= 2:
+            return fragment
+        print(f"⚠️ 移除日文片段: {fragment}", file=sys.stderr, flush=True)
+        return ''
+    
+    text = RE_CONSECUTIVE_KANA.sub(_clean_kana_fragment, text)
+    
+    def _clean_kanji_kana(match):
+        m_text = match.group(0)
+        if len(RE_HIRAGANA_KATAKANA.findall(m_text)) >= 2:
+            return ''
+        return m_text
+    
+    text = RE_KANJI_KANA_PUNCT.sub(_clean_kanji_kana, text)
+    
     # 4. 過濾純英文
-    if re.match(r'^[a-zA-Z_\s]+$', text.strip()) and len(text) > 5:
+    if RE_PURE_ENGLISH.match(text.strip()) and len(text) > 5:
         print(f"⚠️ 過濾純英文: {text[:40]}", file=sys.stderr, flush=True)
         return ""
     
-    # 移除常見前綴
-    prefixes = ['翻譯：', '翻譯:', '中文：', '中文:', '答：', '答:', 
-                '繁體中文：', '繁體中文:', '譯文：', '譯文:', '回答：', '回答:']
-    for prefix in prefixes:
+    # 5. 移除前綴（tuple 迭代）
+    for prefix in PREFIXES_TO_REMOVE:
         if text.startswith(prefix):
             text = text[len(prefix):].strip()
+            break
     
-    # 移除引號包裹
+    # 6. 移除引號包裹
     if len(text) >= 2:
-        if (text[0] == '"' and text[-1] == '"') or \
-           (text[0] == '「' and text[-1] == '」') or \
-           (text[0] == '『' and text[-1] == '』') or \
-           (text[0] == "'" and text[-1] == "'"):
-            text = text[1:-1].strip()
+        for open_q, close_q in QUOTE_PAIRS:
+            if text[0] == open_q and text[-1] == close_q:
+                text = text[1:-1].strip()
+                break
     
-    # 移除奇怪的符號組合
-    text = re.sub(r'[,\s]*[}\]]\s*', '', text)
-    text = re.sub(r'[:\s]*[)\]>]+\s*[?\s]*$', '', text)
-    text = re.sub(r'^[,\s]*[{\[]\s*', '', text)
-    text = re.sub(r'[!?]*["\';)]+\s*$', '', text)
-    text = re.sub(r'["\';(]+\s*[!?]*\s*$', '', text)
-    text = re.sub(r'\s*[!]{2,}["\');\s]*$', '', text)
-    text = re.sub(r'的["\'\s.。，,]+$', '的', text)
-    text = re.sub(r'你這[.\s]*$', '你這傢伙', text)
-    text = re.sub(r'[.\s]+$', '', text)
+    # 7. 批次符號清理
+    for pattern, replacement in RE_SYMBOL_CLEANUP:
+        text = pattern.sub(replacement, text)
     
-    # 移除開頭結尾的特殊符號
-    text = re.sub(r'^[-=_*#]+\s*', '', text)
-    text = re.sub(r'\s*[-=_*#]+$', '', text)
+    # 8. 移除 Markdown
+    text = RE_MARKDOWN_BOLD.sub(r'\1', text)
+    text = RE_MARKDOWN_UNDERLINE.sub(r'\1', text)
+    text = RE_MARKDOWN_CODE.sub(r'\1', text)
     
-    # 移除 markdown 格式
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'__(.+?)__', r'\1', text)
-    text = re.sub(r'`(.+?)`', r'\1', text)
+    # 9. 移除異常英文
+    text = RE_ENGLISH_WORD.sub(_clean_english_word, text)
     
-    # 移除句中異常的英文片段
-    allowed_english = ['K', 'KO', 'OK', 'Combo', 'Gauge', 'Guard', 'Attack', 'Win', 
-                       'Lose', 'HP', 'MP', 'SP', 'BGM', 'NG', 'GG', 'VS', 'DLC',
-                       'Online', 'Offline', 'S', 'A', 'B', 'C', 'D']
-    
-    def clean_english(match):
-        word = match.group(0)
-        if word.upper() in [w.upper() for w in allowed_english] or len(word) <= 2:
-            return word
-        return ''
-    
-    text = re.sub(r'\b[a-zA-Z_]{4,}\b', clean_english, text)
-    
-    # 清理連續重複
+    # 10. 清理連續重複
     text = remove_inline_repetition(text)
     
-    # 簡體轉繁體
+    # 11. 簡體轉繁體
     if OPENCC_CONVERTER:
         try:
             text = OPENCC_CONVERTER.convert(text)
         except Exception as e:
             print(f"⚠️ OpenCC 轉換失敗: {e}", file=sys.stderr, flush=True)
-            sorted_mappings = sorted(SIMPLIFIED_TO_TRADITIONAL.items(), key=lambda x: len(x[0]), reverse=True)
-            for simp, trad in sorted_mappings:
+            for simp, trad in SIMPLIFIED_TO_TRADITIONAL_SORTED:
                 text = text.replace(simp, trad)
-    else:
-        sorted_mappings = sorted(SIMPLIFIED_TO_TRADITIONAL.items(), key=lambda x: len(x[0]), reverse=True)
-        for simp, trad in sorted_mappings:
+    elif SIMPLIFIED_TO_TRADITIONAL_SORTED:
+        for simp, trad in SIMPLIFIED_TO_TRADITIONAL_SORTED:
             text = text.replace(simp, trad)
     
-    # 中國用語 → 台灣用語
-    for china, taiwan in CHINA_TO_TAIWAN.items():
+    # 12. 中國用語 → 台灣用語（預排序 tuple）
+    for china, taiwan in CHINA_TO_TAIWAN_SORTED:
         text = text.replace(china, taiwan)
     
-    # 移除多餘空格
-    text = re.sub(r'\s+', ' ', text).strip()
+    # 13. 🎯 過濾低品質翻譯
+    # 過濾：是想要是想要要回來想要呢大隻的
+    if RE_REPEATED_WORDS.search(text):
+        print(f"⚠️ 過濾低品質翻譯（重複詞）: {text[:40]}", file=sys.stderr, flush=True)
+        return ""
+    
+    # 過濾：快快魔加丁要不要要不要啦
+    if RE_NONSENSE_PATTERN.search(text):
+        match = RE_NONSENSE_PATTERN.search(text)
+        pattern = match.group(1)
+        # 嘗試修復：只保留一次
+        fixed = RE_NONSENSE_PATTERN.sub(pattern, text)
+        if fixed != text and len(fixed) >= 4:
+            print(f"🔧 修復重複模式: {text[:40]} -> {fixed[:40]}", file=sys.stderr, flush=True)
+            text = fixed
+        else:
+            print(f"⚠️ 過濾無意義重複: {text[:40]}", file=sys.stderr, flush=True)
+            return ""
+    
+    # 過濾不完整的句子（但不過濾太短的）
+    if len(text) >= 8 and RE_INCOMPLETE_ENDING.search(text):
+        # 嘗試移除不完整結尾
+        cleaned = RE_INCOMPLETE_ENDING.sub('', text).strip()
+        if len(cleaned) >= 4:
+            print(f"🔧 移除不完整結尾: {text[:40]} -> {cleaned[:40]}", file=sys.stderr, flush=True)
+            text = cleaned
+    
+    # 14. 移除多餘空格
+    text = RE_MULTI_SPACE.sub(' ', text).strip()
     
     return text
+
+
+# ============================================================
+# 🚀 LLM 翻譯（預建立模板）
+# ============================================================
+
+_PROMPT_TEMPLATE = """你是專業的日文遊戲直播即時翻譯員。請將以下日文準確翻譯成繁體中文（台灣用語）。
+
+翻譯規則：
+1. 只輸出翻譯結果，不要解釋或註解
+2. 保持口語化、自然的語氣
+3. 人名音譯：用常見中文譯法（如ヒロ→阿廣、タケシ→阿武、さん→桑/先生）
+4. 遊戲術語：使用台灣玩家慣用譯法
+5. 片假名外來語：翻成中文意思，不要音譯
+6. 語氣詞保留自然感（如：啊、呢、啦、欸）
+7. 聽不清或無意義的輸入，回覆空白
+
+日文：{text}
+中文："""
+
+_REQUEST_OPTIONS = {
+    "temperature": 0.2,
+    "top_p": 0.85,
+    "top_k": 30,
+    "num_predict": 256,
+    "repeat_penalty": 1.15,
+    "stop": ["\n\n", "日文：", "日文原文", "中文：", "翻譯："]
+}
 
 
 async def llm_translate(text: str, session: aiohttp.ClientSession) -> str:
@@ -189,56 +371,62 @@ async def llm_translate(text: str, session: aiohttp.ClientSession) -> str:
     if not text:
         return ""
     
-    prompt = f"""你是專業的日文即時直播翻譯員。將以下日文翻譯成自然流暢的繁體中文（台灣用語）。
-
-規則：
-- 只輸出翻譯結果
-- 保持口語化語氣
-- 人名音譯保留日文發音
-- 無意義輸入回覆空白
-
-日文：{text}
-翻譯："""
+    if not _llm_ready and not _llm_warmup_done:
+        return ""
     
-    try:
-        async with session.post(
-            LLM_API_URL,
-            json={
-                "model": LLM_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "think": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9,
-                    "top_k": 40,
-                    "num_predict": 200,
-                    "repeat_penalty": 1.1,
-                    "stop": ["\n\n", "日文：", "日文原文", "翻譯："]
-                }
-            },
-            timeout=aiohttp.ClientTimeout(total=LLM_TIMEOUT)
-        ) as response:
-            if response.status == 200:
-                result = await response.json()
-                translated = result.get('response', '').strip()
-                
-                translated = clean_llm_output(translated)
-                
-                if translated:
-                    translated = filter_translated_repetition(translated)
-                
-                return translated
-            else:
-                print(f"LLM 翻譯失敗: HTTP {response.status}", file=sys.stderr, flush=True)
-                return ""
-                
-    except asyncio.TimeoutError:
-        print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
-        return ""
-    except aiohttp.ClientError as e:
-        print(f"無法連接 LLM 服務: {e}", file=sys.stderr, flush=True)
-        return ""
-    except Exception as e:
-        print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
-        return ""
+    prompt = _PROMPT_TEMPLATE.format(text=text)
+    request_body = {
+        "model": LLM_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "options": _REQUEST_OPTIONS
+    }
+    
+    max_retries = 2
+    retry_timeout = LLM_TIMEOUT
+    
+    for attempt in range(max_retries + 1):
+        try:
+            current_timeout = retry_timeout * 3 if attempt == 0 else retry_timeout
+            
+            async with session.post(
+                LLM_API_URL,
+                json=request_body,
+                timeout=aiohttp.ClientTimeout(total=current_timeout)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    translated = result.get('response', '').strip()
+                    translated = clean_llm_output(translated)
+                    if translated:
+                        translated = filter_translated_repetition(translated)
+                    if translated:
+                        translated = clean_gibberish_from_translation(translated)
+                    return translated
+                else:
+                    print(f"LLM 翻譯失敗: HTTP {response.status}", file=sys.stderr, flush=True)
+                    if attempt < max_retries:
+                        await asyncio.sleep(0.5)
+                        continue
+                    return ""
+                    
+        except asyncio.TimeoutError:
+            if attempt < max_retries:
+                print(f"LLM 超時，重試 ({attempt + 1}/{max_retries})...", file=sys.stderr, flush=True)
+                await asyncio.sleep(0.5)
+                continue
+            print(f"LLM 翻譯超時 ({LLM_TIMEOUT}s)", file=sys.stderr, flush=True)
+            return ""
+        except aiohttp.ClientError as e:
+            if attempt < max_retries:
+                print(f"LLM 連線失敗，重試 ({attempt + 1}/{max_retries})...", file=sys.stderr, flush=True)
+                await asyncio.sleep(1)
+                continue
+            print(f"無法連接 LLM 服務: {e}", file=sys.stderr, flush=True)
+            return ""
+        except Exception as e:
+            print(f"LLM 翻譯錯誤: {e}", file=sys.stderr, flush=True)
+            return ""
+    
+    return ""
