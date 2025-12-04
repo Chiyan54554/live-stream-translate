@@ -126,6 +126,18 @@ const LIVE_PAGE_URL = 'https://www.twitch.tv/your-channel';
 
 ### 3️⃣ 啟動服務
 
+**Windows:**
+```batch
+start.bat
+```
+
+**Linux / macOS:**
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+**或使用 Docker Compose:**
 ```bash
 docker-compose up --build
 ```
@@ -137,6 +149,15 @@ docker-compose up --build
 ```
 http://localhost:8080
 ```
+
+### 📋 啟動腳本選項
+
+| 選項 | 說明 |
+|------|------|
+| `--build` | 強制重建 Docker 映像 |
+| `--stop` | 停止所有服務 |
+| `--logs` | 查看即時日誌 |
+| `--clean` | 清除所有容器和映像 |
 
 ---
 
