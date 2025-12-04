@@ -3,26 +3,38 @@ const WebSocket = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+// 引入 Redis
 const Redis = require('ioredis'); 
 
 // --- 配置參數 ---
-const WSS_PORT = 8080;
-// ⚠️ 這是 Twitch 或 YouTube 的網頁 URL，供 yt-dlp 解析
-const LIVE_PAGE_URL = 'https://www.twitch.tv/videos/2626749881'; 
+const WSS_PORT = 8080; 
+const LIVE_PAGE_URL = 'https://www.twitch.tv/akamikarubi'; // 直播頁面 URL
 
-// Redis 配置 (從環境變量讀取，供 Docker 使用)
+// Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
 const REDIS_PORT = parseInt(process.env.REDIS_PORT) || 6379; 
 
-const AUDIO_CHANNEL = "audio_feed";           // 📢 Node.js -> Python
-const TRANSLATION_CHANNEL = "translation_feed"; // 👂 Python -> Node.js
+const AUDIO_CHANNEL = "audio_feed";           // Node.js -> Python (發佈音頻)
+const TRANSLATION_CHANNEL = "translation_feed"; // Python -> Node.js (訂閱翻譯)
+
+const SAMPLE_RATE = 16000;
+const BYTES_PER_SAMPLE = 2; // 16-bit PCM = 2 Bytes
+
+// 定義每個音訊塊的時長 (決定 Redis 發佈頻率)
+// 🎯 配合 Python 端 2 秒緩衝，縮短發送間隔
+const CHUNK_DURATION_S = 0.25; // 🎯 每 0.25 秒發送一次（加快響應）
+
+// 計算 Node.js 每次發佈到 Redis 所需的位元組數
+const TARGET_CHUNK_SIZE_BYTES = Math.ceil(
+    CHUNK_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE
+);
 
 let ffmpegProcess = null;
-let publisher; 
-let subscriber; 
+let publisher; // Redis publisher client
+let subscriber; // Redis subscriber client
 let wss; 
 
-// [ WebSocket 啟動和連線邏輯，保持不變 ]
+// [ WebSocket 啟動和連線邏輯 ]
 const server = http.createServer((req, res) => {
     // 服務 client.html
     if (req.url === '/') {
@@ -56,8 +68,18 @@ server.listen(WSS_PORT, () => {
 
 // 1. 初始化 Redis 客戶端並訂閱翻譯結果
 function initializeRedisClients() {
-    publisher = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
-    subscriber = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
+    // 🎯 優化 Redis 連線設定
+    const redisOptions = {
+        host: REDIS_HOST,
+        port: REDIS_PORT,
+        retryStrategy: (times) => Math.min(times * 100, 3000),
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: false,  // 🎯 加快啟動
+        lazyConnect: false,
+    };
+    
+    publisher = new Redis(redisOptions);
+    subscriber = new Redis(redisOptions);
 
     publisher.on('error', (err) => { console.error('致命錯誤：Redis Publisher 連線錯誤:', err); });
     subscriber.on('error', (err) => { console.error('致命錯誤：Redis Subscriber 連線錯誤:', err); });
@@ -76,92 +98,179 @@ function initializeRedisClients() {
     // 處理接收到的 Redis 消息 (翻譯結果)
     subscriber.on('message', (channel, message) => {
         if (channel === TRANSLATION_CHANNEL) {
+            // 🎯 優化：直接廣播，減少 JSON 解析開銷
+            let isValid = false;
             try {
-                // Redis 傳輸保證數據清潔，直接廣播給所有 WebSocket 客戶端
-                JSON.parse(message); // 快速驗證
-                wss.clients.forEach(client => {
+                JSON.parse(message);
+                isValid = true;
+            } catch (e) {
+                console.error('無效 JSON:', e.message);
+            }
+            
+            if (isValid) {
+                // 🎯 批次發送給所有客戶端
+                for (const client of wss.clients) {
                     if (client.readyState === WebSocket.OPEN) {
-                        client.send(message); // 發送原始 JSON 字符串
+                        client.send(message);
                     }
-                });
-            } catch (error) {
-                console.error('致命錯誤：無法解析 Redis 接收到的 JSON 數據:', error.message);
+                }
             }
         }
     });
 }
 
-// 2. 啟動 FFmpeg 處理器，並將輸出發佈到 Redis
-function startFFmpegProcessor(streamUrl) {
-    console.log('--- 啟動 FFmpeg 進程抓取直播流 ---');
+// 2. 啟動串流處理 (yt-dlp -> Pipe -> FFmpeg -> Redis)
+function startStreamProcessing(publisher) {
+    console.log(`--- 正在使用 yt-dlp 啟動串流處理: ${LIVE_PAGE_URL} ---`);
+    const YTDLP_EXEC_PATH = 'yt-dlp';
+    const FFMPEG_EXEC_PATH = 'ffmpeg';
     
-    // FFmpeg 參數 (使用 16kHz 採樣率，與 Python 保持一致)
+    // 🎯 判斷平台並設定對應參數
+    const isYouTube = LIVE_PAGE_URL.includes('youtube.com') || LIVE_PAGE_URL.includes('youtu.be');
+    const isTwitch = LIVE_PAGE_URL.includes('twitch.tv');
+    
+    // 1. 啟動 yt-dlp
+    const ytdlpArgs = [
+        '-f', 'bestaudio/best',     // 🎯 改進：優先音訊，備選最佳
+        '--no-warnings',
+        '--force-ipv4',
+        '--no-check-certificate',
+        '--no-playlist',            // 🎯 不下載播放清單
+        '-o', '-',
+    ];
+    
+    // 🎯 平台特定參數
+    if (isYouTube) {
+        ytdlpArgs.push('--live-from-start');  // 從直播開始處理
+        ytdlpArgs.push('--extractor-args', 'youtube:skip=dash');  // 跳過 DASH 以加速
+    } else if (isTwitch) {
+        ytdlpArgs.push('--referer', 'https://www.twitch.tv/');
+    }
+    
+    ytdlpArgs.push(LIVE_PAGE_URL);
+    
+    const ytdlpProcess = spawn(YTDLP_EXEC_PATH, ytdlpArgs, { 
+        stdio: ['ignore', 'pipe', 'pipe'] 
+    });
+
+    // 2. 啟動 FFmpeg，從 stdin 讀取音頻 ('-i', 'pipe:0')
+    // 🎯 優化 FFmpeg 參數以降低延遲
     const ffmpegArgs = [
-        '-re', 
-        '-nostdin', 
-        '-analyzeduration', '10000000', 
-        '-probesize', '10000000',
-        '-loglevel', 'error', 
-        '-i', streamUrl,
-        '-ac', '1', 
-        '-ar', '16000', // 16kHz
-        '-acodec', 'pcm_s16le', // 16-bit PCM
-        '-f', 's16le', 
-        'pipe:1' // 輸出到 stdout
+        '-fflags', '+nobuffer+flush_packets',  // 🎯 降低緩衝延遲
+        '-flags', 'low_delay',                  // 🎯 低延遲模式
+        '-i', 'pipe:0',          // 讓 FFmpeg 從其 stdin 讀取數據 (即 yt-dlp 的輸出)
+        '-acodec', 'pcm_s16le',
+        '-ar', '16000',
+        '-ac', '1',
+        '-f', 's16le',
+        '-flush_packets', '1',   // 🎯 立即刷新封包
+        'pipe:1'                 // 輸出到 stdout
     ];
 
-    ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-        stdio: ['ignore', 'pipe', process.stderr] // FFmpeg 的 stderr 直接管到 Node.js 的 stderr
+    const ffmpegProcess = spawn(FFMPEG_EXEC_PATH, ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
     });
     
-    console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
+    // 3. 核心：將 yt-dlp 的 stdout 管道連接到 FFmpeg 的 stdin
+    ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
 
-    // 關鍵：將 FFmpeg 的 stdout 數據塊發佈到 Redis 
+    console.log('✅ yt-dlp 輸出已成功導向 FFmpeg 進行處理 (Piping)。');
+    console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
+    
+    // 4. 處理 FFmpeg 的輸出 (音頻數據) - 【關鍵修改區】
+    let audioBuffer = Buffer.alloc(0); // 緩衝器：用於累積數據
+    
     ffmpegProcess.stdout.on('data', (audioChunk) => {
-        // 將 Buffer 轉換為 Base64 字符串發佈，以便 Python 接收
-        const base64Audio = audioChunk.toString('base64');
-        
-        publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
-            console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
-        });
+        // 1. 將新收到的音訊數據追加到緩衝區
+        audioBuffer = Buffer.concat([audioBuffer, audioChunk]);
+
+        // 2. 循環檢查緩衝區是否達到目標塊大小
+        while (audioBuffer.length >= TARGET_CHUNK_SIZE_BYTES) {
+            // a. 擷取固定大小的音訊塊
+            const chunkToSend = audioBuffer.slice(0, TARGET_CHUNK_SIZE_BYTES);
+            
+            // b. 移除已發送的數據
+            audioBuffer = audioBuffer.slice(TARGET_CHUNK_SIZE_BYTES);
+
+            // c. Base64 編碼並發佈到 Redis
+            const base64Audio = chunkToSend.toString('base64');
+            publisher.publish(AUDIO_CHANNEL, base64Audio).catch(err => {
+                console.error('致命錯誤：發佈音頻數據到 Redis 失敗:', err);
+            });
+        }
     });
 
-    ffmpegProcess.on('error', (err) => console.error('FFmpeg 啟動失敗:', err));
+    // 5. 🎯 改進錯誤處理：輸出 yt-dlp 的詳細錯誤
+    ytdlpProcess.stderr.on('data', (data) => {
+        const msg = data.toString().trim();
+        if (msg.includes('ERROR') || msg.includes('error')) {
+            console.error(`[yt-dlp 錯誤]: ${msg}`);
+        }
+    });
+    ytdlpProcess.on('error', (err) => console.error('致命錯誤：yt-dlp 啟動失敗:', err));
+    ytdlpProcess.on('close', (code) => {
+        if (code !== 0) {
+            console.error(`yt-dlp 进程退出, Code: ${code}. 10 秒後嘗試重連...`);
+            setTimeout(() => startStreamProcessing(publisher), 10000);
+        }
+    });
+    
+    // 輸出 FFmpeg 的錯誤和警告 (通常是進度信息，可以註釋掉以減少日誌)
+    ffmpegProcess.stderr.on('data', (data) => {
+         // console.error(`[FFmpeg 警告/錯誤]: ${data.toString().trim()}`);
+    });
+    ffmpegProcess.on('error', (err) => console.error('致命錯誤：FFmpeg 啟動失敗:', err));
     ffmpegProcess.on('close', (code) => {
-        console.log(`FFmpeg 进程退出, Code: ${code}.`);
+        if (code !== 0) {
+            console.log(`FFmpeg 进程退出, Code: ${code}.`);
+        }
     });
 }
 
-// 3. 獲取直播 URL (yt-dlp 邏輯保持不變)
+// 3. 獲取直播 URL (yt-dlp 邏輯)
 function getStreamUrl(callback) {
     console.log(`--- 正在使用 yt-dlp 解析直播串流 URL: ${LIVE_PAGE_URL} ---`);
     const YTDLP_EXEC_PATH = 'yt-dlp'; 
     const ytdlp = spawn(YTDLP_EXEC_PATH, ['-f', 'bestaudio', '--get-url', LIVE_PAGE_URL]);
+    
     let streamUrl = '';
-
+    let ytdlpError = ''; // 🌟 新增：捕獲 yt-dlp 錯誤輸出
+    
     ytdlp.stdout.on('data', (data) => {
         streamUrl += data.toString().trim();
     });
     
     ytdlp.stderr.on('data', (data) => {
-        console.error(`[yt-dlp 调试/警告]: ${data.toString().trim()}`);
+        // 🌟 捕獲所有 stderr 數據
+        ytdlpError += data.toString();
+        // console.error(`[yt-dlp 调试/警告]: ${data.toString().trim()}`); // 可以取消註釋這行查看進度
     });
 
     ytdlp.on('close', (code) => {
         if (code === 0 && streamUrl) {
-            console.log('✅ yt-dlp 解析成功，獲取到串流 URL。');
-            callback(streamUrl.split('\n')[0]);
+            console.log('--- yt-dlp 解析成功。');
+            callback(streamUrl);
         } else {
-            console.error('❌ yt-dlp 解析失敗，無法獲取串流 URL。');
-            callback(null);
+            // 🌟 如果退出碼不是 0 或沒有返回 URL，輸出詳細錯誤
+            console.error(`致命錯誤：yt-dlp 进程退出, Code: ${code}.`);
+            if (ytdlpError.trim()) {
+                console.error(`yt-dlp 錯誤輸出 (stderr):\n${ytdlpError.trim()}`);
+            } else {
+                console.error('yt-dlp 沒有返回詳細錯誤訊息。可能原因：連結無效或非直播，或 Docker 網路問題。');
+            }
+            // 10 秒後重試
+            setTimeout(() => getStreamUrl(callback), 10000); 
         }
+    });
+
+    ytdlp.on('error', (err) => {
+        console.error('致命錯誤：yt-dlp 啟動失敗:', err);
+        setTimeout(() => getStreamUrl(callback), 10000); 
     });
 }
 
 function startMainFlow() {
     initializeRedisClients();
-    getStreamUrl((streamUrl) => {
-        if (!streamUrl) return;
-        startFFmpegProcessor(streamUrl); 
-    });
+    // 直接啟動管道處理，不再需要獲取臨時 URL
+    startStreamProcessing(publisher); 
 }

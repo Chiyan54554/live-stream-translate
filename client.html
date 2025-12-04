@@ -1,132 +1,404 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>直播實時翻譯系統 - Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播即時翻譯</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
-        #container { max-width: 1200px; margin: auto; display: flex; gap: 20px; }
-        #live-video-section { flex: 2; }
-        #translation-section { flex: 1; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1, h2 { color: #333; }
-        #status { padding: 10px; margin-bottom: 15px; border-radius: 4px; font-weight: bold; }
-        .status-ready { background-color: #d4edda; color: #155724; }
-        .status-error { background-color: #f8d7da; color: #721c24; }
-        
-        #results { list-style: none; padding: 0; }
-        .translation-item { margin-bottom: 15px; padding: 10px; border-left: 5px solid #007bff; background-color: #f9f9f9; border-radius: 4px; opacity: 0; animation: fadeIn 0.5s forwards; }
-        .transcription { color: #555; font-style: italic; font-size: 0.9em; margin-bottom: 5px; }
-        .translation { font-weight: bold; color: #000; font-size: 1.1em; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
+        body {
+            font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* 頂部狀態列 */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: #22c55e;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 控制列 */
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #e4e4e4;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        /* 訊息容器 */
+        .messages-container {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 15px;
+            height: calc(100vh - 220px);
+            min-height: 400px;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .messages-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .messages-container::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .messages-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        /* 訊息項目 */
+        .message {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 12px 15px;
+            margin-bottom: 10px;
+            animation: slideIn 0.3s ease;
+            border-left: 3px solid #22c55e;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .timestamp {
+            background: rgba(102, 126, 234, 0.2);
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: #a5b4fc;
+            font-size: 0.8rem;
+            white-space: nowrap;
+        }
+
+        .translation {
+            font-size: 1.15rem;
+            color: #fff;
+            line-height: 1.6;
+            flex: 1;
+        }
+
+        .copy-btn {
+            opacity: 0;
+            padding: 4px 10px;
+            font-size: 0.75rem;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            border-radius: 4px;
+            color: #888;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .message:hover .copy-btn {
+            opacity: 1;
+        }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+        }
+
+        .copy-btn.copied {
+            background: #22c55e;
+            color: #fff;
+        }
+
+        /* 空狀態 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+
+        /* 統計資訊 */
+        .stats {
+            display: flex;
+            gap: 20px;
+            font-size: 0.85rem;
+            color: #888;
+            margin-left: auto;
+        }
+
+        .msg-limit-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: #888;
+        }
+
+        /* RWD */
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .header h1 {
+                font-size: 1.2rem;
+            }
+
+            .messages-container {
+                height: calc(100vh - 280px);
+            }
+
+            .translation {
+                font-size: 1rem;
+            }
+
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .stats {
+                margin-left: 0;
+                justify-content: center;
+            }
         }
     </style>
 </head>
 <body>
-    <h1>直播實時翻譯系統</h1>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ 直播即時翻譯</h1>
+            <div class="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">連線中...</span>
+            </div>
+        </div>
 
-    <div id="container">
-        <section id="live-video-section">
-            <h2>直播內容 (YouTube/Twitch)</h2>
-            <iframe 
-                width="100%" 
-                height="400" 
-                src="https://www.twitch.tv/videos/2626749881" 
-                frameborder="0" 
-                allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" 
-                allowfullscreen>
-            </iframe>
-            <p><strong>注意：</strong> 音訊處理在伺服器端進行，請確保您的 Node.js 伺服器正在使用 FFmpeg 抓取此直播源。</p>
-        </section>
+        <div class="controls">
+            <button class="btn btn-primary" id="toggleScroll">
+                <span>📜</span> 自動滾動: 開
+            </button>
+            <button class="btn btn-secondary" id="clearBtn">
+                <span>🗑️</span> 清除
+            </button>
+            <div class="msg-limit-control">
+                <label>上限:</label>
+                <select id="msgLimit" class="select-control">
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="0">無限</option>
+                </select>
+            </div>
+            <div class="stats">
+                <span>📝 <strong id="msgCount">0</strong> 則</span>
+            </div>
+        </div>
 
-        <section id="translation-section">
-            <h2>實時翻譯結果</h2>
-            <div id="status" class="status-error">連線狀態: 正在嘗試連接伺服器...</div>
-            <ul id="results">
-                <li>等待第一個翻譯片段...</li>
-            </ul>
-        </section>
+        <div class="messages-container" id="messages">
+            <div class="empty-state" id="emptyState">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                </svg>
+                <p>等待翻譯結果...</p>
+            </div>
+        </div>
     </div>
 
     <script>
-        const WSS_URL = 'ws://localhost:8080'; // 必须匹配 server.js 的端口
-        const resultsList = document.getElementById('results');
-        const statusDiv = document.getElementById('status');
-        let socket;
+        const messagesContainer = document.getElementById('messages');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const toggleScrollBtn = document.getElementById('toggleScroll');
+        const clearBtn = document.getElementById('clearBtn');
+        const msgCount = document.getElementById('msgCount');
+        const emptyState = document.getElementById('emptyState');
+        const msgLimitSelect = document.getElementById('msgLimit');
 
-        function updateStatus(message, isError = false) {
-            statusDiv.textContent = '連線狀態: ' + message;
-            statusDiv.className = isError ? 'status-error' : 'status-ready';
-        }
+        let autoScroll = true;
+        let messageCount = 0;
+        let maxMessages = 50;
+        let ws = null;
 
-        function connectWebSocket() {
-            if (socket) {
-                socket.close();
-            }
-            updateStatus('正在連接...', false);
-
-            socket = new WebSocket(WSS_URL);
-
-            socket.onopen = function() {
-                updateStatus('連接成功！等待伺服器傳輸翻譯結果...', false);
-                // 移除初始化提示
-                if (resultsList.children[0] && resultsList.children[0].textContent.includes('等待')) {
-                    resultsList.innerHTML = '';
-                }
+        function connect() {
+            ws = new WebSocket(`ws://${window.location.hostname}:8080`);
+            ws.onopen = () => {
+                statusDot.classList.add('connected');
+                statusText.textContent = '已連線';
             };
-
-            socket.onmessage = function(event) {
+            ws.onclose = () => {
+                statusDot.classList.remove('connected');
+                statusText.textContent = '重新連線中...';
+                setTimeout(connect, 3000);
+            };
+            ws.onmessage = (event) => {
                 try {
-                    // 接收并解析 Python 传回的 JSON 字符串
-                    const data = JSON.parse(event.data); 
-                    
-                    if (data.status === 'error') {
-                         updateStatus(`伺服器錯誤: ${data.message}`, true);
-                         return;
-                    }
-
-                    // 渲染翻译结果
-                    const listItem = document.createElement('li');
-                    listItem.className = 'translation-item';
-                    
-                    // 原始轉錄
-                    const transDiv = document.createElement('div');
-                    transDiv.className = 'transcription';
-                    transDiv.textContent = `(${data.timestamp}) [${data.source_lang}]: ${data.transcription || '（轉錄中...）'}`;
-                    
-                    // 翻譯結果
-                    const trDiv = document.createElement('div');
-                    trDiv.className = 'translation';
-                    trDiv.textContent = `[${data.target_lang}]: ${data.translation || '（翻譯中...）'}`;
-                    
-                    listItem.appendChild(transDiv);
-                    listItem.appendChild(trDiv);
-                    
-                    // 将最新结果添加到列表顶部
-                    resultsList.prepend(listItem);
-                    
-                } catch (error) {
-                    console.error("無法解析接收到的數據:", event.data);
-                    updateStatus('接收到無效數據，請檢查 Python 輸出格式。', true);
-                }
-            };
-
-            socket.onclose = function(event) {
-                updateStatus('連接已斷開，嘗試在 5 秒後重連...', true);
-                // 自动重连机制
-                setTimeout(connectWebSocket, 5000); 
-            };
-
-            socket.onerror = function(error) {
-                console.error('WebSocket 錯誤:', error);
-                updateStatus('WebSocket 發生錯誤！', true);
+                    addMessage(JSON.parse(event.data));
+                } catch (e) {}
             };
         }
 
-        // 页面加载完成后立即尝试连接
-        window.onload = connectWebSocket;
+        function addMessage(data) {
+            // 隱藏空狀態
+            if (emptyState) {
+                emptyState.style.display = 'none';
+            }
+
+            const div = document.createElement('div');
+            div.className = 'message';
+            div.innerHTML = `
+                <span class="timestamp">${data.timestamp || new Date().toLocaleTimeString()}</span>
+                <span class="translation">${escapeHtml(data.translation)}</span>
+                <button class="copy-btn" onclick="copyText(this, '${escapeHtml(data.translation)}')">複製</button>
+            `;
+            messagesContainer.appendChild(div);
+            messageCount++;
+            msgCount.textContent = messageCount;
+            trimMessages();
+            if (autoScroll) messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function copyText(btn, text) {
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = '已複製';
+                btn.classList.add('copied');
+                setTimeout(() => { btn.textContent = '複製'; btn.classList.remove('copied'); }, 1500);
+            });
+        }
+
+        function trimMessages() {
+            if (maxMessages === 0) return;
+            while (messagesContainer.querySelectorAll('.message').length > maxMessages) {
+                const m = messagesContainer.querySelector('.message');
+                if (m) m.remove();
+            }
+            messageCount = messagesContainer.querySelectorAll('.message').length;
+            msgCount.textContent = messageCount;
+        }
+
+        msgLimitSelect.addEventListener('change', (e) => { maxMessages = parseInt(e.target.value); trimMessages(); });
+        toggleScrollBtn.addEventListener('click', () => {
+            autoScroll = !autoScroll;
+            toggleScrollBtn.textContent = `📜 自動滾動: ${autoScroll ? '開' : '關'}`;
+        });
+        clearBtn.addEventListener('click', () => {
+            messagesContainer.querySelectorAll('.message').forEach(m => m.remove());
+            emptyState.style.display = 'block';
+            messageCount = 0;
+            msgCount.textContent = '0';
+        });
+
+        // 啟動連線
+        connect();
     </script>
 </body>
 </html>

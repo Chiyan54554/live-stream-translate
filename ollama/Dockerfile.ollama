@@ -1,0 +1,17 @@
+# Dockerfile for Ollama LLM Service
+# 🎯 模型存在持久化 volume 中，不會每次建構都重新下載
+FROM ollama/ollama:latest
+
+# 設定環境變數
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_MODELS=/root/.ollama/models
+
+# 複製啟動腳本
+COPY ollama/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 暴露 Ollama API 端口
+EXPOSE 11434
+
+# 使用自訂啟動腳本
+ENTRYPOINT ["/entrypoint.sh"]

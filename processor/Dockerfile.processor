@@ -1,13 +1,62 @@
-# processor/Dockerfile.processor
-FROM python:3.9-slim
+# Dockerfile for Python Processor (建議使用獨立的 Dockerfile.processor)
 
-# 安裝 Python 依賴
-WORKDIR /app/processor
+# 使用 PyTorch 2.9.1 with CUDA 12.8 (支援 RTX 50 系列)
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+
+# 設定環境變數
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/root/.cache/huggingface
+ENV MODEL_CACHE_DIR=/root/.cache/huggingface/hub
+
+# 安裝必要套件
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 建立快取目錄
+RUN mkdir -p /root/.cache/huggingface/hub
+
+# 設定工作目錄
+WORKDIR /app
+
+# 複製 requirements
 COPY processor/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# 複製應用程式碼
-COPY processor/processor.py .
+# 🌟 關鍵：安裝 CTranslate2 相容的 cuDNN 9.1.x
+RUN pip install --no-cache-dir nvidia-cudnn-cu12==9.1.0.70
 
-# 啟動 Python 程式
-CMD ["python", "processor.py"]
+# 🌟 建立符號連結，讓 CTranslate2 找到 cuDNN
+RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib && \
+    echo "cuDNN lib path: $CUDNN_PATH" && \
+    ls -la $CUDNN_PATH && \
+    mkdir -p /usr/local/lib/ctranslate2 && \
+    ln -sf $CUDNN_PATH/libcudnn*.so* /usr/local/lib/ctranslate2/
+
+# 安裝其他依賴 (使用 aiohttp 異步連接 Ollama LLM)
+RUN pip install --no-cache-dir \
+    ctranslate2>=4.5.0 \
+    faster-whisper>=1.1.0 \
+    stable-ts>=2.16.0 \
+    requests>=2.31.0 \
+    aiohttp>=3.9.0 \
+    redis>=5.0.0 \
+    numpy>=1.24.0 \
+    opencc-python-reimplemented>=0.1.7 \
+    # 🎯 Kotoba-Whisper v2.1 支援 (Transformers Pipeline)
+    transformers>=4.39.0 \
+    accelerate>=0.20.0 \
+    punctuators==0.0.5
+
+# 複製程式碼和資源檔案
+COPY processor/__init__.py .
+COPY processor/config.py .
+COPY processor/text_utils.py .
+COPY processor/translator.py .
+COPY processor/asr.py .
+COPY processor/main.py .
+COPY processor/mappings/ ./mappings/
+
+# 🌟 啟動時設定 LD_LIBRARY_PATH，讓 CTranslate2 優先使用我們安裝的 cuDNN
+CMD ["sh", "-c", "export LD_LIBRARY_PATH=/usr/local/lib/ctranslate2:$(python -c 'import nvidia.cudnn; print(nvidia.cudnn.__path__[0])')/lib:$LD_LIBRARY_PATH && python -m main"]
