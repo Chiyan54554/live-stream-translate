@@ -31,13 +31,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 設定工作目錄
 WORKDIR /app
 
-# 複製 requirements（分離以利快取）
+# ============================================================
+# 🚀 分層快取策略：將套件安裝分成多個獨立層
+# 只有當該層的依賴變更時才會重新建構
+# ============================================================
+
+# 📦 第一層：安裝 PyTorch + torchaudio (最大，約 2.5GB，很少變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        torch==2.7.0 \
+        torchaudio==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# 📦 第二層：安裝 ASR 核心套件 (中等大小，較少變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        faster-whisper>=1.0.0 \
+        "stable-ts>=2.16.0,<2.20.0" \
+        --extra-index-url https://download.pytorch.org/whl/cu128
+
+# 📦 第三層：安裝 Transformers 相關 (中等大小)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        transformers>=4.40.0 \
+        accelerate>=0.30.0 \
+        punctuators>=0.0.5
+
+# 複製 requirements（用於安裝剩餘套件）
 COPY processor/requirements.txt .
 
-# 🚀 安裝 PyTorch 2.7 + CUDA 12.8 (支援 RTX 50 系列 sm_120)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-compile torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128 && \
-    pip install --no-compile -r requirements.txt
+# 📦 第四層：安裝剩餘小型套件 (快速，可能較常變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile -r requirements.txt \
+        --extra-index-url https://download.pytorch.org/whl/cu128
 
 # 🌟 建立符號連結，讓 CTranslate2 找到 cuDNN
 RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib && \
