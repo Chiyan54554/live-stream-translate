@@ -1,123 +1,199 @@
-# Live Stream Real-time Translation System (直播實時翻譯系統) v2.0
+# 🎙️ 直播即時翻譯系統
 
-這是一個高效能的實時直播翻譯系統，專為 Twitch 等直播平台設計。它利用 **Faster-Whisper** 進行極速語音轉文字（ASR），並結合 **Google Translate** 實現即時日中翻譯，最後透過 WebSocket 將字幕推送到 Web 客戶端。
+將日文直播即時轉錄並翻譯成繁體中文的自動化系統。
 
-![License](https://img.shields.io/badge/license-ISC-blue.svg)
-![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
-![Node.js](https://img.shields.io/badge/node.js-6DA55F?style=flat&logo=node.js&logoColor=white)
-![Python](https://img.shields.io/badge/python-3670A0?style=flat&logo=python&logoColor=white)
-![Faster-Whisper](https://img.shields.io/badge/AI-Faster--Whisper-orange)
+## ✨ 功能特色
 
-## ✨ 核心特色 (v2.0)
-
-*   **🚀 極速轉錄 (Faster-Whisper)**：採用 CTranslate2 加速的 `faster-whisper` 實作，比原始 OpenAI Whisper 快 4-5 倍，並大幅降低 VRAM 佔用。
-*   **🧠 智能滑動視窗**：實作 5 秒緩衝與 1.5 秒重疊（Sliding Window）機制，有效解決語句被切斷的問題，大幅提升長句識別率。
-*   **🔇 語音活動偵測 (VAD)**：內建 VAD 過濾器，自動忽略靜音片段，減少無效請求與幻覺。
-*   **🛡️ 抗幻覺過濾**：針對直播場景優化，自動過濾「ご視聴ありがとうございました」、「字幕」等常見 AI 幻覺與重複語句。
-*   **⚡ GPU 加速**：完整支援 NVIDIA CUDA 加速（Float16/Int8 量化），在消費級顯卡上也能流暢運行 `large-v3` 模型。
-*   **🌐 實時 Web UI**：現代化響應式介面，支援深色模式，即時顯示轉錄原文與翻譯結果。
+- 🎯 **即時語音辨識**：使用 Kotoba-Whisper v2.2（日文優化）或 Whisper large-v3
+- 🌐 **智能翻譯**：支援本地 LLM (Ollama) 或 Google Translate
+- ⚡ **低延遲串流**：yt-dlp + FFmpeg 管道處理
+- 🖥️ **網頁介面**：即時顯示翻譯結果
+- 🐳 **Docker 部署**：一鍵啟動所有服務
 
 ## 🏗️ 系統架構
 
-系統由三個主要 Docker 容器組成，透過 Redis 進行高效能通訊：
-
-```mermaid
-graph TD
-    Live["直播源 (Twitch)"] -->|yt-dlp/ffmpeg| Node["Node.js Server"]
-    Node -->|"音訊數據 (Pub, 1s chunks)"| Redis[("Redis Message Broker")]
-    Redis -->|"音訊數據 (Sub)"| Python["Python Processor"]
-    Python -->|"滑動視窗緩衝 (5s)"| Python
-    Python -->|"Faster-Whisper (ASR)"| Python
-    Python -->|"Google Translate (MT)"| Python
-    Python -->|"翻譯結果 (Pub)"| Redis
-    Redis -->|"翻譯結果 (Sub)"| Node
-    Node -->|WebSocket| Client["Web Client (Browser)"]
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   直播平台   │───▶│  Node.js    │───▶│   Redis     │───▶│   Python    │
+│ Twitch/YT   │    │ yt-dlp+FFmpeg│    │  Pub/Sub    │    │  Processor  │
+└─────────────┘    └─────────────┘    └─────────────┘    └──────┬──────┘
+                                                                │
+                   ┌─────────────┐    ┌─────────────┐           │
+                   │   瀏覽器    │◀───│  WebSocket  │◀──────────┘
+                   │  client.html │    │   Server    │
+                   └─────────────┘    └─────────────┘
 ```
 
-1.  **Node.js Server**: 負責串流抓取，將音訊切割成 1 秒的小塊發送至 Redis，並作為 WebSocket 伺服器廣播結果。
-2.  **Redis**: 高效能訊息佇列，解耦音訊擷取與 AI 處理。
-3.  **Python Processor**: 核心處理單元。維護一個 5 秒的滑動音訊緩衝區，執行 VAD、ASR 和翻譯，並具備上下文記憶功能。
+## 📦 系統需求
+
+- **GPU**：NVIDIA GPU（建議 8GB+ VRAM）
+- **Docker**：Docker Desktop with NVIDIA Container Toolkit
+- **作業系統**：Windows 10/11、Linux、macOS
+
+### VRAM 需求
+
+| 配置 | ASR 模型 | 翻譯引擎 | 總 VRAM |
+|------|----------|----------|---------|
+| 最低 | medium | Google Translate | ~5GB |
+| 推薦 | kotoba-v2.2 | Ollama qwen3:8b | ~12GB |
+| 高階 | large-v3 | Ollama qwen3:8b | ~16GB |
 
 ## 🚀 快速開始
 
-### 前置需求
+### 1. 複製專案
 
-*   **Docker** & **Docker Compose**
-*   **NVIDIA GPU** (強烈建議): 需安裝 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)。
-    *   *系統預設配置為 GPU 模式，若無 GPU 需修改 `docker-compose.yml` 和 `processor.py`。*
+```bash
+git clone https://github.com/your-repo/live-stream-translate.git
+cd live-stream-translate
+```
 
-### 安裝與執行
+### 2. 設定直播 URL
 
-1.  **複製專案**
-    ```bash
-    git clone https://github.com/YourUsername/live-stream-translate.git
-    cd live-stream-translate
-    ```
+編輯 `server/server.js`：
 
-2.  **啟動服務**
-    使用 Docker Compose 一鍵啟動：
-    ```bash
-    docker-compose up --build
-    ```
-    *首次啟動會下載 `large-v3` 模型 (約 3GB) 和 Docker 映像檔，請耐心等待。*
+```javascript
+const LIVE_PAGE_URL = 'https://www.twitch.tv/your-channel';
+```
 
-3.  **開啟客戶端**
-    在瀏覽器中訪問 `client.html` (或部署後的網址)。
-    *   預設 WebSocket 地址: `ws://localhost:8080`
+### 3. 啟動服務
+
+```bash
+docker-compose up --build
+```
+
+首次啟動會下載模型（約 10-15GB），請耐心等待。
+
+### 4. 開啟網頁
+
+瀏覽器開啟：http://localhost:8080
 
 ## ⚙️ 配置說明
 
-### 1. 修改直播源
-目標直播 URL 定義在 `server/server.js` 中：
+### ASR 模型選擇
 
-```javascript
-// server/server.js
-const LIVE_PAGE_URL = 'https://www.twitch.tv/nekoko88'; // 修改此處
-```
-修改後需重啟 Server 容器：`docker-compose restart server`
-
-### 2. 調整 AI 模型
-在 `docker-compose.yml` 中可以調整模型大小與參數：
+編輯 `docker-compose.yml`：
 
 ```yaml
 environment:
-  # 可選: tiny, base, small, medium, large-v2, large-v3
-  ASR_MODEL_NAME: large-v3
+  # 日文優化（推薦）
+  ASR_MODEL_NAME: kotoba-tech/kotoba-whisper-v2.2
+  
+  # 標準 Whisper（備選）
+  # ASR_MODEL_NAME: large-v3
+  # ASR_MODEL_NAME: large-v3-turbo  # 較快
+  # ASR_MODEL_NAME: medium          # 省 VRAM
 ```
 
-### 3. 調整緩衝與延遲
-在 `processor/processor.py` 中可以調整滑動視窗參數：
+### 翻譯引擎選擇
+
+目前支援：
+- **Ollama (qwen3:8b)**：本地 LLM，免費，品質佳
+- **Google Translate**：免費，速度快
+
+## 📁 專案結構
+
+```
+live-stream-translate/
+├── docker-compose.yml      # Docker 服務編排
+├── Dockerfile.server       # Node.js 服務映像
+├── client.html             # 網頁前端
+├── server/
+│   ├── server.js           # Node.js 主程式
+│   └── package.json
+├── processor/
+│   ├── Dockerfile.processor
+│   ├── main.py             # Python 主程式
+│   ├── asr.py              # 語音辨識模組
+│   ├── translator.py       # 翻譯模組
+│   ├── text_utils.py       # 文字處理
+│   └── config.py           # 配置檔
+└── ollama/
+    └── Dockerfile.ollama   # Ollama 服務映像
+```
+
+## 🔧 進階設定
+
+### 調整緩衝時長
+
+編輯 `processor/config.py`：
 
 ```python
-BUFFER_DURATION_S = 5.0   # 緩衝區長度 (秒)
-OVERLAP_DURATION_S = 1.5  # 重疊長度 (秒)
+BUFFER_DURATION_S = 4.0     # 音訊緩衝（秒）
+MIN_PUBLISH_INTERVAL = 0.8  # 最小發布間隔（秒）
 ```
-*較長的緩衝區能提升準確度，但會增加字幕顯示的延遲。*
 
-## 🛠️ 技術棧
+### 使用 OpenAI API
 
-*   **Frontend**: HTML5, CSS3 (Modern UI), JavaScript (WebSocket)
-*   **Backend**: Node.js, Express, `fluent-ffmpeg`, `yt-dlp`
-*   **AI Core**: 
-    *   Python 3.10+
-    *   **Faster-Whisper** (CTranslate2 backend)
-    *   **PyTorch** (CUDA support)
-    *   Deep Translator
-*   **Infrastructure**: Docker, Redis 8.x
+1. 建立 `.env` 檔案：
 
-## 📝 常見問題
+```env
+OPENAI_API_KEY=sk-your-api-key
+```
 
-*   **Q: 為什麼字幕有延遲？**
-    *   A: 為了保證語意完整，系統會緩衝 5 秒的音訊進行識別。加上直播本身的延遲與運算時間，總延遲約為 5-8 秒是正常的。
-*   **Q: 如何解決 WSL2 Docker 權限錯誤？**
-    *   A: 如果遇到 `failed to write file` 錯誤，請嘗試重啟 Docker Desktop 或執行 `wsl --shutdown` 重置子系統。
-*   **Q: 支援哪些語言？**
-    *   A: 目前預設配置為 **日文 -> 繁體中文**。可在 `processor.py` 中修改 `SOURCE_LANG_CODE` 和 `TARGET_LANG_CODE` 來支援其他語言。
+2. 修改 `docker-compose.yml`：
 
-## 🤝 貢獻
+```yaml
+environment:
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_MODEL: gpt-4o-mini
+```
 
-歡迎提交 Issue 或 Pull Request 來改進這個專案！
+## 📊 費用估算
+
+### 2 小時直播
+
+| 配置 | 費用 |
+|------|------|
+| 本地 Whisper + Ollama | **免費** |
+| 本地 Whisper + Google Translate | **免費** |
+| 本地 Whisper + GPT-4o-mini | ~$0.20 |
+| OpenAI Whisper + GPT-4o-mini | ~$0.90 |
+
+## 🐛 常見問題
+
+### Q: 模型下載很慢？
+
+使用 HuggingFace 鏡像：
+
+```yaml
+environment:
+  HF_ENDPOINT: https://hf-mirror.com
+```
+
+### Q: CUDA out of memory？
+
+1. 使用較小的模型：`ASR_MODEL_NAME: medium`
+2. 關閉 Ollama，改用 Google Translate
+
+### Q: 翻譯有重複內容？
+
+系統已內建去重機制，如仍有問題可調整：
+
+```python
+SIMILARITY_THRESHOLD = 0.7  # 提高此值
+```
+
+### Q: yt-dlp 無法擷取串流？
+
+1. 更新 yt-dlp：`pip install -U yt-dlp`
+2. 確認直播連結正確且正在直播中
+
+## 📝 更新日誌
+
+### v1.0.0
+- 初始版本
+- 支援 Twitch / YouTube 直播
+- Kotoba-Whisper v2.2 日文優化
+- Ollama 本地 LLM 翻譯
 
 ## 📄 授權
 
-ISC License
+MIT License
+
+## 🙏 致謝
+
+- [OpenAI Whisper](https://github.com/openai/whisper)
+- [Kotoba-Whisper](https://huggingface.co/kotoba-tech)
+- [stable-ts](https://github.com/jianfch/stable-ts)
+- [Ollama](https://ollama.ai)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
