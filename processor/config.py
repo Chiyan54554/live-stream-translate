@@ -20,8 +20,11 @@ OVERLAP_DURATION_S: float = 1.5      # 增加重疊確保語句連貫
 MIN_AUDIO_ENERGY: float = 0.002      # 較低門檻，捕捉輕聲語音
 
 # 🎯 預先計算的緩衝區大小 (避免運行時乘法)
-BUFFER_SIZE_BYTES: int = 160000      # int(5.0 * 16000 * 2)
-OVERLAP_SIZE_BYTES: int = 48000      # int(1.5 * 16000 * 2)
+BUFFER_SIZE_BYTES: int = int(BUFFER_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
+OVERLAP_SIZE_BYTES: int = int(OVERLAP_DURATION_S * SAMPLE_RATE * BYTES_PER_SAMPLE)
+
+# 🎯 預計算的能量閾值平方（避免 sqrt）
+MIN_AUDIO_ENERGY_SQUARED: float = MIN_AUDIO_ENERGY ** 2
 
 # === Redis 設定 ===
 REDIS_HOST: str = os.getenv('REDIS_HOST', 'redis')

@@ -100,6 +100,7 @@ def _get_bigrams(s: str) -> frozenset:
     return frozenset(s[i:i+2] for i in range(len(s)-1))
 
 
+@lru_cache(maxsize=512)
 def calculate_similarity(s1: str, s2: str) -> float:
     """計算兩個字串的相似度 (0-1) - 優化版"""
     if not s1 or not s2:
@@ -109,15 +110,17 @@ def calculate_similarity(s1: str, s2: str) -> float:
     
     len1, len2 = len(s1), len(s2)
     
-    # 方法 1: 子字串檢測（先檢查較短的）
-    if len1 <= len2:
-        if s1 in s2:
-            return len1 / len2
-    else:
-        if s2 in s1:
-            return len2 / len1
+    # 🎯 長度差異過大，直接返回低相似度
+    if max(len1, len2) > min(len1, len2) * 3:
+        return 0.1
     
-    # 方法 2: Bigram Jaccard 相似度（使用快取）
+    # 方法 1: 子字串檢測
+    if len1 <= len2 and s1 in s2:
+        return len1 / len2
+    if len2 < len1 and s2 in s1:
+        return len2 / len1
+    
+    # 方法 2: Bigram Jaccard 相似度
     bigrams1 = _get_bigrams(s1)
     bigrams2 = _get_bigrams(s2)
     

@@ -430,3 +430,34 @@ async def llm_translate(text: str, session: aiohttp.ClientSession) -> str:
             return ""
     
     return ""
+
+# 🎯 全域 HTTP 連線池（避免每次建立新連線）
+_http_connector = None
+_http_session = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """取得或建立 HTTP session（連線池重用）"""
+    global _http_connector, _http_session
+    
+    if _http_session is None or _http_session.closed:
+        _http_connector = aiohttp.TCPConnector(
+            limit=10,
+            limit_per_host=5,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True,
+        )
+        _http_session = aiohttp.ClientSession(connector=_http_connector)
+    
+    return _http_session
+
+
+async def close_http_session():
+    """關閉 HTTP session"""
+    global _http_session, _http_connector
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+    if _http_connector:
+        await _http_connector.close()
+    _http_session = None
+    _http_connector = None

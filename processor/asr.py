@@ -11,7 +11,7 @@ from collections import Counter
 
 from config import (
     ASR_MODEL_NAME, MODEL_CACHE_DIR, USE_KOTOBA_PIPELINE,
-    SAMPLE_RATE, SOURCE_LANG_CODE, MIN_AUDIO_ENERGY,
+    SAMPLE_RATE, SOURCE_LANG_CODE, MIN_AUDIO_ENERGY_SQUARED,
     USE_VAD, VAD_THRESHOLD, SUPPRESS_SILENCE, ONLY_VOICE_FREQ,
     AVG_PROB_THRESHOLD, MAX_INSTANT_WORDS
 )
@@ -217,9 +217,10 @@ def init_asr_model():
 
 
 def check_voice_activity(audio_array: np.ndarray) -> bool:
-    """簡單的語音活動偵測 (VAD)"""
-    rms = np.sqrt(np.mean(audio_array ** 2))
-    return rms > MIN_AUDIO_ENERGY
+    """簡單的語音活動偵測 (VAD) - 優化版：避免 sqrt"""
+    # 🎯 使用 np.vdot（比 np.mean 更快）+ 避免 sqrt
+    energy_squared = np.vdot(audio_array, audio_array) / len(audio_array)
+    return energy_squared > MIN_AUDIO_ENERGY_SQUARED
 
 
 def whisper_asr(audio_array: np.ndarray) -> str:

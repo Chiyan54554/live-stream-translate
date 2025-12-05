@@ -201,16 +201,31 @@ function startStreamProcessing(publisher) {
     
     // 4. 處理 FFmpeg 的輸出 (音頻數據) - 🎯 優化版本
     let audioBuffer = Buffer.alloc(0);
-    
+    let audioBufferOffset = 0;
+
+    // 🎯 預分配較大的緩衝區，減少 concat 次數
+    const PREALLOCATE_SIZE = TARGET_CHUNK_SIZE_BYTES * 10;
+    let preallocatedBuffer = Buffer.alloc(PREALLOCATE_SIZE);
+
     ffmpegProcess.stdout.on('data', (audioChunk) => {
-        // 🎯 使用更高效的 Buffer 操作
-        audioBuffer = Buffer.concat([audioBuffer, audioChunk]);
+        // 🎯 使用預分配緩衝區
+        if (audioBufferOffset + audioChunk.length > preallocatedBuffer.length) {
+            // 需要擴展
+            const newBuffer = Buffer.alloc(Math.max(preallocatedBuffer.length * 2, audioBufferOffset + audioChunk.length));
+            preallocatedBuffer.copy(newBuffer, 0, 0, audioBufferOffset);
+            preallocatedBuffer = newBuffer;
+        }
+        
+        audioChunk.copy(preallocatedBuffer, audioBufferOffset);
+        audioBufferOffset += audioChunk.length;
 
         // 🎯 使用 while 迴圈處理多個完整區塊
-        while (audioBuffer.length >= TARGET_CHUNK_SIZE_BYTES) {
-            // 🎯 使用 subarray 比 slice 更快 (不複製，返回視圖)
-            const chunkToSend = audioBuffer.subarray(0, TARGET_CHUNK_SIZE_BYTES);
-            audioBuffer = audioBuffer.subarray(TARGET_CHUNK_SIZE_BYTES);
+        while (audioBufferOffset >= TARGET_CHUNK_SIZE_BYTES) {
+            const chunkToSend = preallocatedBuffer.subarray(0, TARGET_CHUNK_SIZE_BYTES);
+            
+            // 移動剩餘數據到開頭
+            preallocatedBuffer.copy(preallocatedBuffer, 0, TARGET_CHUNK_SIZE_BYTES, audioBufferOffset);
+            audioBufferOffset -= TARGET_CHUNK_SIZE_BYTES;
 
             // Base64 編碼並發佈到 Redis
             publisher.publish(AUDIO_CHANNEL, chunkToSend.toString('base64'));
