@@ -19,7 +19,9 @@ from config import (
     ASR_MODEL_NAME, MODEL_CACHE_DIR, USE_KOTOBA_PIPELINE,
     SAMPLE_RATE, SOURCE_LANG_CODE, MIN_AUDIO_ENERGY,
     USE_VAD, VAD_THRESHOLD, SUPPRESS_SILENCE, ONLY_VOICE_FREQ,
-    AVG_PROB_THRESHOLD, MAX_INSTANT_WORDS
+    AVG_PROB_THRESHOLD, MAX_INSTANT_WORDS,
+    USE_GOOGLE_STT, GOOGLE_STT_MODEL, GOOGLE_STT_MAX_ALTERNATIVES,
+    GOOGLE_STT_ENABLE_PUNCTUATION, GOOGLE_STT_FAIL_LIMIT, GOOGLE_STT_BACKOFF_MS
 )
 
 # === 全域變數 ===
@@ -28,6 +30,9 @@ DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
 USING_KOTOBA_PIPELINE = False
 TRANSFORMERS_AVAILABLE = False
+google_speech_client = None
+GOOGLE_STT_ENABLED = USE_GOOGLE_STT
+GOOGLE_STT_FAILS = 0
 
 # ============================================================
 # 🚀 預建立 ASR 參數字典（避免每次呼叫重新建立）
@@ -94,6 +99,11 @@ _CONFIDENCE_THRESHOLDS = (
 def setup_environment():
     """設定環境變數和 CUDA"""
     global DEVICE, COMPUTE_TYPE, TRANSFORMERS_AVAILABLE
+
+    # 雲端 STT 不需 CUDA/Torch
+    if GOOGLE_STT_ENABLED:
+        info("🎯 Google Speech-to-Text 已啟用")
+        return
     
     # 確保 cuDNN 路徑正確
     try:
@@ -128,7 +138,28 @@ def setup_environment():
 
 def init_asr_model():
     """初始化 ASR 模型"""
-    global asr_model, DEVICE, COMPUTE_TYPE, USING_KOTOBA_PIPELINE
+    global asr_model, DEVICE, COMPUTE_TYPE, USING_KOTOBA_PIPELINE, google_speech_client
+
+    if GOOGLE_STT_ENABLED:
+        try:
+            from google.cloud import speech_v1p1beta1 as speech
+        except ImportError:
+            print("❌ 缺少 google-cloud-speech 套件，請安裝後重試", file=sys.stderr, flush=True)
+            sys.exit(1)
+
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_path and not os.path.exists(cred_path):
+            print(f"❌ GOOGLE_APPLICATION_CREDENTIALS 路徑不存在: {cred_path}", file=sys.stderr, flush=True)
+            sys.exit(1)
+
+        try:
+            google_speech_client = speech.SpeechClient()
+            info(f"✅ Google Speech-to-Text 客戶端已就緒 (model={GOOGLE_STT_MODEL})")
+            return
+        except Exception as e:
+            print(f"❌ 初始化 Google Speech-to-Text 失敗: {e}", file=sys.stderr, flush=True)
+            traceback.print_exc()
+            sys.exit(1)
     
     import torch
     import stable_whisper
@@ -228,8 +259,71 @@ def check_voice_activity(audio_array: np.ndarray) -> bool:
     return rms > MIN_AUDIO_ENERGY
 
 
+def google_stt_transcribe(audio_array: np.ndarray) -> str:
+    """使用 Google Speech-to-Text 轉寫線性 PCM"""
+    global google_speech_client, GOOGLE_STT_FAILS, GOOGLE_STT_ENABLED
+    try:
+        from google.cloud import speech_v1p1beta1 as speech
+
+        pcm16 = np.clip(audio_array, -1.0, 1.0)
+        pcm16 = (pcm16 * 32767.0).astype(np.int16)
+        audio_bytes = pcm16.tobytes()
+
+        config_kwargs = dict(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=SAMPLE_RATE,
+            language_code=SOURCE_LANG_CODE,
+            max_alternatives=GOOGLE_STT_MAX_ALTERNATIVES,
+            enable_automatic_punctuation=GOOGLE_STT_ENABLE_PUNCTUATION,
+        )
+
+        if GOOGLE_STT_MODEL:
+            # 只有指定時才帶入 model，避免不支援語言時 400 錯誤
+            config_kwargs["model"] = GOOGLE_STT_MODEL
+            info(f"🔧 Google STT 使用 model={GOOGLE_STT_MODEL}")
+
+        config = speech.RecognitionConfig(**config_kwargs)
+
+        audio = speech.RecognitionAudio(content=audio_bytes)
+
+        response = google_speech_client.recognize(
+            config=config,
+            audio=audio,
+            timeout=15,
+        )
+
+        # 成功則重置失敗計數
+        GOOGLE_STT_FAILS = 0
+
+        for result in response.results:
+            if not result.alternatives:
+                continue
+            transcript = result.alternatives[0].transcript.strip()
+            if transcript:
+                return transcript
+        return ""
+
+    except Exception as e:
+        GOOGLE_STT_FAILS += 1
+        print(f"ASR 錯誤 (Google STT): {e}", file=sys.stderr, flush=True)
+        # 失敗退避，避免打爆 API
+        backoff_ms = min(GOOGLE_STT_BACKOFF_MS * GOOGLE_STT_FAILS, 3000)
+        if backoff_ms > 0:
+            time.sleep(backoff_ms / 1000.0)
+        if GOOGLE_STT_FAILS >= GOOGLE_STT_FAIL_LIMIT:
+            GOOGLE_STT_ENABLED = False
+            print(f"⚠️ Google STT 連續失敗 {GOOGLE_STT_FAILS} 次，切換回本地 ASR", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        return ""
+
+
 def whisper_asr(audio_array: np.ndarray) -> str:
     """使用 ASR 進行語音辨識"""
+    if GOOGLE_STT_ENABLED:
+        if google_speech_client is None or not check_voice_activity(audio_array):
+            return ""
+        return google_stt_transcribe(audio_array)
+
     if asr_model is None or not check_voice_activity(audio_array):
         return ""
 

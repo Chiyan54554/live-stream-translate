@@ -5,6 +5,9 @@
 # 翻譯與工具
 opencc-python-reimplemented>=0.1.7
 
+# 雲端 ASR
+google-cloud-speech>=2.26.0
+
 # 異步 I/O
 redis>=5.0.0
 aiohttp>=3.9.0

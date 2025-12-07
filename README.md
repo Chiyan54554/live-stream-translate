@@ -133,6 +133,27 @@ environment:
   # ASR_MODEL_NAME: large-v3                          # 標準 Whisper
 ```
 
+#### 改用 Google Speech-to-Text（雲端）
+
+1. 下載並儲存 GCP 服務帳戶 JSON，並在 `docker-compose.yml` 掛載：
+    ```yaml
+    services:
+       processor:
+          volumes:
+             - ./gcp-sa.json:/app/keys/gcp-sa.json:ro
+    ```
+
+2. 啟用 Google STT 並指定憑證路徑（支援 `latest_short` / `latest_long` 模型）：
+    ```yaml
+    services:
+       processor:
+          environment:
+             USE_GOOGLE_STT: "1"
+             GOOGLE_APPLICATION_CREDENTIALS: /app/keys/gcp-sa.json
+             GOOGLE_STT_MODEL: latest_short  # 選填，預設 latest_short
+    ```
+    > 提示：Google STT 會跳過本地 Whisper，減少 GPU 負載；語言代碼沿用 `SOURCE_LANG_CODE`（預設 ja）。
+
 ### 更換 LLM 模型
 
 編輯 `docker-compose.yml`：

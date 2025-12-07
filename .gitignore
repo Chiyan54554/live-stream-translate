@@ -1,0 +1,30 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Node
+node_modules/
+
+# Python venv
+.venv/
+venv/
+
+# Environment & local settings
+.env
+.env.*
+*.env
+
+# Logs
+*.log
+
+# Local credentials (GCP/others)
+nodal-alloy-*.json
+*.service-account.json
+*.gcp-key.json
+
+# VS Code
+.vscode/
+
+# Docker/Build
+*.pid
+*.seed

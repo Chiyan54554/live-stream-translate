@@ -40,6 +40,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       # 🎯 指定要使用的模型（啟動時自動下載，如果還沒下載的話）
       OLLAMA_MODEL: "qwen3:8b"
+      # 若啟動期預熱常失敗，可關閉預熱加快啟動；首次請求時會載入
+      OLLAMA_WARMUP: "0"
     
     # 持久化模型，避免重複下載
     volumes:
@@ -74,6 +76,14 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
+      USE_GOOGLE_STT: "1"
+      GOOGLE_APPLICATION_CREDENTIALS: /app/keys/gcp-sa.json
+      # GOOGLE_STT_MODEL: default   # 留空或 default 由 Google 自行選型
+      GOOGLE_STT_ENABLE_PUNCTUATION: "1"
+      GOOGLE_STT_MAX_ALTERNATIVES: 1
+      SOURCE_LANG_CODE: ja
+      TARGET_LANG_CODE: zh-TW
+      # 如需改辨識語言，可加：SOURCE_LANG_CODE: zh-TW
       # 🌟 Kotoba-Whisper v2.2：日文優化 Transformers 版 (最新，支援標點)
       # 備選: kotoba-tech/kotoba-whisper-v2.1, large-v3 (標準 faster-whisper)
       # ⚠️ v2.2 沒有提供 faster (CTranslate2) 版本
@@ -90,6 +100,7 @@ services:
     
     volumes:
       - huggingface_cache:/root/.cache/huggingface
+      - ./nodal-alloy-480514-e2-7bbdf332cfed.json:/app/keys/gcp-sa.json:ro
     
     # 🚀 只等待 Redis，Ollama 會在背景載入
     depends_on:
