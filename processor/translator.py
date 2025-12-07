@@ -9,11 +9,29 @@ import aiohttp
 import time
 import os
 
-from config import LLM_API_URL, LLM_MODEL, LLM_TIMEOUT
+from config import (
+    LLM_API_URL,
+    LLM_MODEL,
+    LLM_TIMEOUT,
+    USE_CLOUD_TRANSLATION,
+    CLOUD_TRANSLATE_PROJECT_ID,
+    CLOUD_TRANSLATE_LOCATION,
+    CLOUD_TRANSLATE_TIMEOUT,
+    TARGET_LANG_CODE,
+    SOURCE_LANG_CODE,
+)
 
 # 🚀 全域狀態：追蹤 LLM 是否就緒
 _llm_ready = False
 _llm_warmup_done = False
+_translate_client = None
+_translate_parent = None
+_cloud_disabled = False  # 避免重複 403 造成刷屏
+
+try:
+    from google.cloud import translate
+except Exception:
+    translate = None
 
 from text_utils import (
     remove_inline_repetition, 
@@ -134,10 +152,16 @@ CHINA_TO_TAIWAN_SORTED = tuple(
 async def warmup_llm():
     """🚀 非阻塞 LLM 預熱 - 背景等待 Ollama 就緒"""
     global _llm_ready, _llm_warmup_done
-    
+
     if _llm_warmup_done:
         return _llm_ready
-    
+
+    if USE_CLOUD_TRANSLATION:
+        _llm_ready = True
+        _llm_warmup_done = True
+        print("🌐 使用 Cloud Translation，跳過 LLM 預熱", file=sys.stderr, flush=True)
+        return True
+
     print("🔄 背景等待 Ollama 模型載入...", file=sys.stderr, flush=True)
     start_time = time.time()
     max_wait = 300  # 最多等待 5 分鐘（首次載入模型到 GPU 需要時間）
@@ -339,6 +363,78 @@ def clean_llm_output(text: str) -> str:
 
 
 # ============================================================
+# 🌐 Cloud Translation (Google)
+# ============================================================
+
+def _get_translate_client():
+    """建立或回傳共用的 Cloud Translation client"""
+    global _translate_client, _translate_parent
+    if _translate_client:
+        return _translate_client
+    if not translate:
+        print("⚠️ 未安裝 google-cloud-translate，無法使用 Cloud Translation", file=sys.stderr, flush=True)
+        return None
+    if not CLOUD_TRANSLATE_PROJECT_ID:
+        print("⚠️ 未設定 CLOUD_TRANSLATE_PROJECT_ID，無法使用 Cloud Translation", file=sys.stderr, flush=True)
+        return None
+    if not re.match(r"^[a-z][a-z0-9-]*$", CLOUD_TRANSLATE_PROJECT_ID):
+        print(f"⚠️ CLOUD_TRANSLATE_PROJECT_ID 格式無效: {CLOUD_TRANSLATE_PROJECT_ID}", file=sys.stderr, flush=True)
+        return None
+    try:
+        _translate_client = translate.TranslationServiceClient()
+        _translate_parent = f"projects/{CLOUD_TRANSLATE_PROJECT_ID}/locations/{CLOUD_TRANSLATE_LOCATION}"
+    except Exception as e:
+        print(f"⚠️ 建立 Cloud Translation client 失敗: {e}", file=sys.stderr, flush=True)
+        _translate_client = None
+    return _translate_client
+
+
+def _cloud_translate_sync(text: str) -> str:
+    global _cloud_disabled
+    if _cloud_disabled:
+        return ""
+    client = _get_translate_client()
+    if client is None:
+        return ""
+    if not _translate_parent:
+        return ""
+    try:
+        response = client.translate_text(
+            request={
+                "parent": _translate_parent,
+                "contents": [text],
+                "mime_type": "text/plain",
+                "source_language_code": SOURCE_LANG_CODE,
+                "target_language_code": TARGET_LANG_CODE,
+            },
+            timeout=CLOUD_TRANSLATE_TIMEOUT,
+        )
+        if response.translations:
+            return response.translations[0].translated_text
+    except Exception as e:
+        msg = str(e)
+        print(f"⚠️ Cloud Translation 失敗: {msg}", file=sys.stderr, flush=True)
+        if "cloudtranslate.generalModels.predict" in msg or "403" in msg:
+            print("⚠️ 偵測到權限不足，暫停 Cloud Translation，請為 service account 加上 Cloud Translation API User 角色", file=sys.stderr, flush=True)
+            _cloud_disabled = True
+    return ""
+
+
+async def _translate_with_cloud(text: str) -> str:
+    if not text:
+        return ""
+    loop = asyncio.get_event_loop()
+    translated = await loop.run_in_executor(None, _cloud_translate_sync, text)
+    if translated:
+        translated = clean_llm_output(translated)
+    if translated:
+        translated = filter_translated_repetition(translated)
+    if translated:
+        translated = clean_gibberish_from_translation(translated)
+    return translated
+
+
+# ============================================================
 # 🚀 LLM 翻譯（預建立模板）
 # ============================================================
 
@@ -370,6 +466,12 @@ async def llm_translate(text: str, session: aiohttp.ClientSession) -> str:
     """使用 Ollama Qwen3 LLM 進行日文到繁體中文翻譯"""
     if not text:
         return ""
+
+    if USE_CLOUD_TRANSLATION and not _cloud_disabled:
+        translated = await _translate_with_cloud(text)
+        if translated:
+            return translated
+        print("⚠️ Cloud Translation 失敗，改用 Ollama 備援", file=sys.stderr, flush=True)
     
     if not _llm_ready and not _llm_warmup_done:
         return ""

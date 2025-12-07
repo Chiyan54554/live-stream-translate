@@ -15,13 +15,13 @@ SOURCE_LANG_CODE: str = "ja"
 TARGET_LANG_CODE: str = "zh-TW"
 
 # === 緩衝與品質設定 (使用 float 而非計算式) ===
-BUFFER_DURATION_S: float = 3.0       # 降低延遲：3 秒緩衝
-OVERLAP_DURATION_S: float = 1.0      # 相應調整重疊
+BUFFER_DURATION_S: float = 1.4       # 折衷延遲/穩定：1.4 秒緩衝
+OVERLAP_DURATION_S: float = 0.35     # 保留少量上下文
 MIN_AUDIO_ENERGY: float = 0.002      # 較低門檻，捕捉輕聲語音
 
 # 🎯 預先計算的緩衝區大小 (避免運行時乘法)
-BUFFER_SIZE_BYTES: int = 96000       # int(3.0 * 16000 * 2)
-OVERLAP_SIZE_BYTES: int = 32000      # int(1.0 * 16000 * 2)
+BUFFER_SIZE_BYTES: int = 44800       # int(1.4 * 16000 * 2)
+OVERLAP_SIZE_BYTES: int = 11200      # int(0.35 * 16000 * 2)
 
 # === Redis 設定 ===
 REDIS_HOST: str = os.getenv('REDIS_HOST', 'redis')
@@ -56,7 +56,13 @@ LLM_PORT: str = os.getenv('LLM_PORT', '11434')
 LLM_MODEL: str = os.getenv('LLM_MODEL', 'qwen3:8b')
 # 🎯 預先建立的 URL (避免每次請求時字串格式化)
 LLM_API_URL: str = f"http://{LLM_HOST}:{LLM_PORT}/api/generate"
-LLM_TIMEOUT: int = 10  # 翻譯超時秒數
+LLM_TIMEOUT: int = 3  # 翻譯超時秒數（避免過早截斷）
+
+# === Google Cloud Translation ===
+USE_CLOUD_TRANSLATION: bool = os.getenv('USE_CLOUD_TRANSLATION', '0') == '1'
+CLOUD_TRANSLATE_PROJECT_ID: str = os.getenv('CLOUD_TRANSLATE_PROJECT_ID', '')
+CLOUD_TRANSLATE_LOCATION: str = os.getenv('CLOUD_TRANSLATE_LOCATION', 'global')
+CLOUD_TRANSLATE_TIMEOUT: int = int(os.getenv('CLOUD_TRANSLATE_TIMEOUT', 3))
 
 # === stable-ts 與 VAD 設定 (使用 bool 和 float 常數) ===
 USE_STABLE_TS: bool = True
@@ -69,16 +75,22 @@ MAX_INSTANT_WORDS: float = 0.25      # 更嚴格過濾瞬時詞幻覺
 ONLY_VOICE_FREQ: bool = True         # 聚焦人聲頻率範圍
 
 # === 發布控制設定 ===
-MIN_PUBLISH_INTERVAL: float = 0.5
+MIN_PUBLISH_INTERVAL: float = 0.25
 SIMILARITY_THRESHOLD: float = 0.75
 
 # 🎯 預先建立的配置字串 (用於 print_config)
 _CONFIG_SEPARATOR: str = "=" * 50
+_TRANSLATION_DESC = (
+    f"Google Cloud Translation (project={CLOUD_TRANSLATE_PROJECT_ID or 'unset'}, location={CLOUD_TRANSLATE_LOCATION})"
+    if USE_CLOUD_TRANSLATION else
+    f"{LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}"
+)
+
 _CONFIG_LINES: tuple = (
     f"🎯 ASR 模型: {ASR_MODEL_NAME}",
     f"🎯 使用 Kotoba Pipeline: {USE_KOTOBA_PIPELINE}",
     f"🎯 使用 Google STT: {USE_GOOGLE_STT}",
-    f"🎯 LLM 翻譯: {LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}",
+    f"🎯 翻譯引擎: {_TRANSLATION_DESC}",
     f"🎯 stable-ts: {USE_STABLE_TS}, VAD: {USE_VAD}",
 )
 

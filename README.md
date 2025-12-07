@@ -142,6 +142,7 @@ environment:
           volumes:
              - ./gcp-sa.json:/app/keys/gcp-sa.json:ro
     ```
+    > 你也可以使用自己的檔名（例如 `nodal-alloy-....json`），記得同步更新 volume 路徑與 `GOOGLE_APPLICATION_CREDENTIALS`。
 
 2. 啟用 Google STT 並指定憑證路徑（支援 `latest_short` / `latest_long` 模型）：
     ```yaml
@@ -164,6 +165,21 @@ environment:
   # LLM_MODEL: "qwen2.5:7b"       # 備選
   # LLM_MODEL: "llama3.1:8b"      # 英文更強
 ```
+
+#### 改用 Google Cloud Translation（雲端翻譯）
+
+1. 確認 `processor` 服務已掛載 GCP 憑證並設定 `GOOGLE_APPLICATION_CREDENTIALS`。
+2. 在 `docker-compose.yml` 啟用 Cloud Translation：
+    ```yaml
+    services:
+       processor:
+          environment:
+             USE_CLOUD_TRANSLATION: "1"
+             CLOUD_TRANSLATE_PROJECT_ID: "your-gcp-project-id"
+             # 可選：CLOUD_TRANSLATE_LOCATION: global
+             # 可選：CLOUD_TRANSLATE_TIMEOUT: 8
+    ```
+3. 啟用後會改用 Cloud Translation，Ollama 不再參與翻譯（仍可保留作備援，將 USE_CLOUD_TRANSLATION 設回 0 即可）。
 
 ### 調整緩衝參數
 

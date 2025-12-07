@@ -12,7 +12,7 @@ const log = (...args) => LOG_VERBOSE && console.log(...args);
 
 // --- 配置參數 (預先計算的常數) ---
 const WSS_PORT = 8080; 
-const LIVE_PAGE_URL = 'https://www.twitch.tv/amagami_channel'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/tenshiuyu'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
