@@ -15,13 +15,13 @@ SOURCE_LANG_CODE: str = "ja"
 TARGET_LANG_CODE: str = "zh-TW"
 
 # === 緩衝與品質設定 (使用 float 而非計算式) ===
-BUFFER_DURATION_S: float = 5.0       # 5 秒緩衝，讓 ASR 有更多上下文
-OVERLAP_DURATION_S: float = 1.5      # 增加重疊確保語句連貫
+BUFFER_DURATION_S: float = 3.0       # 降低延遲：3 秒緩衝
+OVERLAP_DURATION_S: float = 1.0      # 相應調整重疊
 MIN_AUDIO_ENERGY: float = 0.002      # 較低門檻，捕捉輕聲語音
 
 # 🎯 預先計算的緩衝區大小 (避免運行時乘法)
-BUFFER_SIZE_BYTES: int = 160000      # int(5.0 * 16000 * 2)
-OVERLAP_SIZE_BYTES: int = 48000      # int(1.5 * 16000 * 2)
+BUFFER_SIZE_BYTES: int = 96000       # int(3.0 * 16000 * 2)
+OVERLAP_SIZE_BYTES: int = 32000      # int(1.0 * 16000 * 2)
 
 # === Redis 設定 ===
 REDIS_HOST: str = os.getenv('REDIS_HOST', 'redis')
@@ -40,6 +40,15 @@ MODEL_CACHE_DIR: str = os.getenv('MODEL_CACHE_DIR', '/root/.cache/huggingface/hu
 
 # 🎯 預先計算的布林值 (避免重複字串查找)
 USE_KOTOBA_PIPELINE: bool = 'kotoba-whisper-v2.1' in ASR_MODEL_NAME or 'kotoba-whisper-v2.2' in ASR_MODEL_NAME
+
+# === Google Speech-to-Text ===
+USE_GOOGLE_STT: bool = os.getenv('USE_GOOGLE_STT', '0') == '1'
+# 留空則由 Google 預設模型決定，避免語言不支援的錯誤
+GOOGLE_STT_MODEL: str = os.getenv('GOOGLE_STT_MODEL', '')
+GOOGLE_STT_MAX_ALTERNATIVES: int = int(os.getenv('GOOGLE_STT_MAX_ALTERNATIVES', 1))
+GOOGLE_STT_ENABLE_PUNCTUATION: bool = os.getenv('GOOGLE_STT_ENABLE_PUNCTUATION', '1') == '1'
+GOOGLE_STT_FAIL_LIMIT: int = int(os.getenv('GOOGLE_STT_FAIL_LIMIT', 5))
+GOOGLE_STT_BACKOFF_MS: int = int(os.getenv('GOOGLE_STT_BACKOFF_MS', 500))
 
 # === LLM 翻譯設定 (Ollama) ===
 LLM_HOST: str = os.getenv('LLM_HOST', 'ollama')
@@ -68,6 +77,7 @@ _CONFIG_SEPARATOR: str = "=" * 50
 _CONFIG_LINES: tuple = (
     f"🎯 ASR 模型: {ASR_MODEL_NAME}",
     f"🎯 使用 Kotoba Pipeline: {USE_KOTOBA_PIPELINE}",
+    f"🎯 使用 Google STT: {USE_GOOGLE_STT}",
     f"🎯 LLM 翻譯: {LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}",
     f"🎯 stable-ts: {USE_STABLE_TS}, VAD: {USE_VAD}",
 )

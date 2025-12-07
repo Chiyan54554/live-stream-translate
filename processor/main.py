@@ -17,7 +17,7 @@ from config import (
     SAMPLE_RATE, BYTES_PER_SAMPLE, SOURCE_LANG_CODE, TARGET_LANG_CODE,
     BUFFER_DURATION_S, OVERLAP_DURATION_S,
     MIN_PUBLISH_INTERVAL, SIMILARITY_THRESHOLD,
-    USE_VAD, SUPPRESS_SILENCE,
+    USE_VAD, SUPPRESS_SILENCE, USE_GOOGLE_STT,
     print_config
 )
 
@@ -290,7 +290,10 @@ async def main():
     p = r.pubsub()
     await p.subscribe(AUDIO_CHANNEL)
     print(f"✅ 已訂閱: {AUDIO_CHANNEL}", file=sys.stderr, flush=True)
-    print(f"🎯 stable-ts 整合模式已啟用 (異步)", file=sys.stderr, flush=True)
+    if USE_GOOGLE_STT:
+        print(f"🎯 Google Speech-to-Text 模式已啟用", file=sys.stderr, flush=True)
+    else:
+        print(f"🎯 stable-ts 整合模式已啟用 (異步)", file=sys.stderr, flush=True)
     print(f"🎯 VAD: {USE_VAD}, 靜音抑制: {SUPPRESS_SILENCE}", file=sys.stderr, flush=True)
 
     try:
