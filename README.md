@@ -1,4 +1,4 @@
-# 🎙️ Live Stream Real-time Translation System (直播即時翻譯系統) v2.2
+# 🎙️ Live Stream Real-time Translation System (直播即時翻譯系統) v2.3.3
 
 一個高效能的實時直播翻譯系統，專為日文直播設計。採用 **Kotoba-Whisper v2.2**（日文優化 ASR）+ **Ollama Qwen3:8b**（本地 LLM 翻譯）架構，透過 WebSocket 將翻譯結果即時推送到 Web 客戶端。
 
@@ -6,20 +6,22 @@
 ![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
 ![Node.js](https://img.shields.io/badge/node.js-6DA55F?style=flat&logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3670A0?style=flat&logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.9-EE4C2C?style=flat&logo=pytorch&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.7-EE4C2C?style=flat&logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?style=flat&logo=nvidia&logoColor=white)
 
-## ✨ v2.2 核心特色
+## ✨ v2.3.3 核心特色
 
 ### 🧠 AI 引擎升級
-- **Kotoba-Whisper v2.2**：專為日文優化的 Whisper 模型，支援標點符號輸出，幻覺更少
-- **Ollama Qwen3:8b**：本地運行的高品質 LLM 翻譯，無需 API 金鑰，隱私安全
+- **Kotoba-Whisper v2.2**：日文優化 ASR，支援標點且幻覺少
+- **Ollama Qwen3:8b**：本地 LLM 翻譯，隱私安全；支援低 VRAM 模式
 - **stable-ts 整合**：時間戳對齊與 VAD 增強，提升識別精度
 
 ### ⚡ 效能優化
-- **GPU 加速**：完整支援 NVIDIA CUDA 12.8 + cuDNN 9，RTX 50 系列相容
-- **高效資料結構**：預編譯正則表達式、frozenset O(1) 查找、LRU 快取
-- **智能緩衝**：5 秒滑動視窗 + 1.5 秒重疊，平衡延遲與準確度
+- **CUDA 12.8 / RTX 50 相容**：基底映像改為 `nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04`
+- **PyTorch 2.7.0 + cu128**：與 RTX 50 系列 sm_120 相容，torchaudio 同步版本
+- **分層快取 Dockerfile**：torch/torchaudio/ASR/Transformers 分層安裝，搭配 BuildKit pip cache，重建更快
+- **程式啟動優化**：延遲載入 numpy/LLM/ASR 函數，Redis 連線重試，HTTP 連線池 DNS cache
+- **智能緩衝**：5 秒滑動視窗 + 1.5 秒重疊，兼顧延遲與上下文
 
 ### 🛡️ 翻譯品質
 - **多層幻覺過濾**：ASR 幻覺檢測、重複詞過濾、無意義音譯過濾
@@ -85,9 +87,14 @@ graph TD
    ```
 
 3. **啟動服務**
-   ```bash
-   docker compose up --build
-   ```
+    - PowerShell：
+       ```powershell
+       $env:DOCKER_BUILDKIT=1; docker compose up --build
+       ```
+    - bash：
+       ```bash
+       DOCKER_BUILDKIT=1 docker compose up --build
+       ```
    > ⏳ 首次啟動會下載：
    > - Kotoba-Whisper v2.2 模型 (~3GB)
    > - Qwen3:8b LLM 模型 (~5GB)
@@ -183,6 +190,7 @@ live-stream-translate/
 | **Frontend** | HTML5, CSS3 (Dark Mode), Vanilla JS |
 | **Backend** | Node.js 25.x, yt-dlp, FFmpeg |
 | **AI Core** | PyTorch 2.9, Transformers, stable-ts |
+| **AI Core** | PyTorch 2.7.0+cu128, Transformers, stable-ts |
 | **ASR** | Kotoba-Whisper v2.2 (Transformers Pipeline) |
 | **Translation** | Ollama + Qwen3:8b, OpenCC (s2twp) |
 | **Infra** | Docker, Redis 8.x, CUDA 12.8, cuDNN 9 |
