@@ -162,11 +162,51 @@ async def warmup_llm():
         print("🌐 使用 Cloud Translation，跳過 LLM 預熱", file=sys.stderr, flush=True)
         return True
 
+    async def _ensure_llm_model(session: aiohttp.ClientSession) -> bool:
+        """檢查模型是否存在；不存在時觸發拉取以避免 404"""
+        try:
+            async with session.post(
+                f"{LLM_API_URL.replace('/api/generate','')}/api/show",
+                json={"model": LLM_MODEL},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    return True
+                if resp.status != 404:
+                    print(f"⚠️ 模型檢查失敗: HTTP {resp.status}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"⚠️ 模型檢查錯誤: {e}", file=sys.stderr, flush=True)
+            # 繼續嘗試拉取
+        # 嘗試拉取模型
+        print(f"🔄 自動拉取模型 {LLM_MODEL} ...", file=sys.stderr, flush=True)
+        try:
+            async with session.post(
+                f"{LLM_API_URL.replace('/api/generate','')}/api/pull",
+                json={"model": LLM_MODEL, "stream": False},
+                timeout=aiohttp.ClientTimeout(total=900)
+            ) as resp:
+                if resp.status == 200:
+                    print(f"✅ 已拉取模型 {LLM_MODEL}", file=sys.stderr, flush=True)
+                    return True
+                else:
+                    print(f"⚠️ 拉取模型失敗: HTTP {resp.status}", file=sys.stderr, flush=True)
+                    return False
+        except Exception as e:
+            print(f"⚠️ 拉取模型錯誤: {e}", file=sys.stderr, flush=True)
+            return False
+
     print("🔄 背景等待 Ollama 模型載入...", file=sys.stderr, flush=True)
     start_time = time.time()
     max_wait = 300  # 最多等待 5 分鐘（首次載入模型到 GPU 需要時間）
     
     async with aiohttp.ClientSession() as session:
+        model_ready = await _ensure_llm_model(session)
+        if not model_ready:
+            print("⚠️ 模型不存在且拉取失敗，請檢查模型名稱或網路", file=sys.stderr, flush=True)
+            _llm_warmup_done = True
+            _llm_ready = False
+            return False
+
         while time.time() - start_time < max_wait:
             try:
                 # 🚀 首次請求需要 60 秒以上（模型載入到 GPU）

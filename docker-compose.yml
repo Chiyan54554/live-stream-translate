@@ -39,7 +39,11 @@ services:
       OLLAMA_HOST: "0.0.0.0:11434"
       NVIDIA_VISIBLE_DEVICES: all
       # 🎯 指定要使用的模型（啟動時自動下載，如果還沒下載的話）
-      OLLAMA_MODEL: "qwen3:8b"
+      # 預設使用已知可用的量化模型，避免 404（模型不存在）
+      # 建議使用官方 instruct 量化標籤，避免 404
+      OLLAMA_MODEL: "qwen3:8b-q4_K_M"
+      # 可選：若想省資源，可改為 qwen2.5:7b-instruct-q4_K_M
+      OLLAMA_KEEP_ALIVE: "2h"                      # 保持模型在記憶體避免重載
       # 若啟動期預熱常失敗，可關閉預熱加快啟動；首次請求時會載入
       OLLAMA_WARMUP: "0"
     
@@ -99,7 +103,8 @@ services:
       # 🌟 LLM 翻譯配置 (連接 Docker 內的 Ollama 服務)
       LLM_HOST: ollama
       LLM_PORT: "11434"
-      LLM_MODEL: "qwen3:8b"
+      LLM_MODEL: "qwen3:8b-q4_K_M"
+      # 可選：LLM_MODEL: "qwen2.5:7b-instruct-q4_K_M"（較省 VRAM）
       USE_CLOUD_TRANSLATION: "1"
       CLOUD_TRANSLATE_PROJECT_ID: "nodal-alloy-480514-e2"  # 請改成實際 GCP 專案 ID（需以字母開頭）
       # 可選：CLOUD_TRANSLATE_LOCATION: "global"
