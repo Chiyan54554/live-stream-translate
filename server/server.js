@@ -8,7 +8,7 @@ const Redis = require('ioredis');
 
 // --- 配置參數 (預先計算的常數) ---
 const WSS_PORT = 8080; 
-const LIVE_PAGE_URL = 'https://www.twitch.tv/sakuramimiru'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/nekoko88'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -27,14 +27,16 @@ const CHUNK_DURATION_S = 0.25; // 🎯 每 0.25 秒發送一次（加快響應�
 // 🎯 預先計算的常數 (避免運行時計算)
 const TARGET_CHUNK_SIZE_BYTES = 8000; // Math.ceil(0.25 * 16000 * 2) = 8000
 
-// 🎯 預先建立的 Redis 連線選項 (避免每次重建物件)
+// 🎯 預先建立的 Redis 連線選項 (優化連線速度)
 const REDIS_OPTIONS = Object.freeze({
     host: REDIS_HOST,
     port: REDIS_PORT,
-    retryStrategy: (times) => Math.min(times * 100, 3000),
+    retryStrategy: (times) => Math.min(times * 50, 2000),
     maxRetriesPerRequest: 3,
     enableReadyCheck: false,
-    lazyConnect: false,
+    lazyConnect: true,       // 🚀 延遲連線，加快啟動
+    connectTimeout: 5000,    // 🚀 縮短連線超時
+    commandTimeout: 3000,    // 🚀 命令超時
 });
 
 // 🎯 預先建立的 yt-dlp 基礎參數 (凍結陣列防止意外修改)
@@ -64,15 +66,15 @@ const FFMPEG_ARGS = Object.freeze([
 const YOUTUBE_DOMAINS = new Set(['youtube.com', 'youtu.be']);
 const TWITCH_DOMAINS = new Set(['twitch.tv']);
 
-// 🎯 預先讀取 client.html (避免每次請求都讀檔)
+// 🎯 同步預讀 client.html (伺服器啟動時即就緒)
 const CLIENT_HTML_PATH = path.join(__dirname, '../client.html');
-let cachedClientHtml = null;
-fs.readFile(CLIENT_HTML_PATH, (err, data) => {
-    if (!err) {
-        cachedClientHtml = data;
-        console.log('✅ client.html 已預先快取');
-    }
-});
+let cachedClientHtml;
+try {
+    cachedClientHtml = fs.readFileSync(CLIENT_HTML_PATH);
+} catch (e) {
+    console.error('⚠️ 無法預載 client.html:', e.message);
+    cachedClientHtml = null;
+}
 
 // 🎯 平台檢測函數 (使用 Set 的 O(1) 查找)
 const isYouTube = YOUTUBE_DOMAINS.has('youtube.com') || YOUTUBE_DOMAINS.has('youtu.be') 
@@ -90,24 +92,13 @@ const HTML_HEADERS = Object.freeze({ 'Content-Type': 'text/html' });
 
 // [ WebSocket 啟動和連線邏輯 ]
 const server = http.createServer((req, res) => {
-    // 🎯 使用快取的 client.html
-    if (req.url === '/') {
-        if (cachedClientHtml) {
-            res.writeHead(200, HTML_HEADERS);
-            res.end(cachedClientHtml);
-        } else {
-            // 快取未就緒時的備援方案
-            fs.readFile(CLIENT_HTML_PATH, (err, data) => {
-                if (err) {
-                    res.writeHead(500);
-                    res.end('Error loading client.html');
-                    return;
-                }
-                cachedClientHtml = data; // 同時更新快取
-                res.writeHead(200, HTML_HEADERS);
-                res.end(data);
-            });
-        }
+    // 🎯 極簡路由：只處理根路徑
+    if (req.url === '/' && cachedClientHtml) {
+        res.writeHead(200, HTML_HEADERS);
+        res.end(cachedClientHtml);
+    } else if (req.url === '/') {
+        res.writeHead(503);
+        res.end('Service loading...');
     } else {
         res.writeHead(404);
         res.end();
@@ -128,15 +119,18 @@ server.listen(WSS_PORT, () => {
 
 
 // 1. 初始化 Redis 客戶端並訂閱翻譯結果
-function initializeRedisClients() {
+async function initializeRedisClients() {
     // 🎯 使用預建立的 Redis 選項
     publisher = new Redis(REDIS_OPTIONS);
     subscriber = new Redis(REDIS_OPTIONS);
 
-    publisher.on('error', (err) => { console.error('致命錯誤：Redis Publisher 連線錯誤:', err); });
-    subscriber.on('error', (err) => { console.error('致命錯誤：Redis Subscriber 連線錯誤:', err); });
-    publisher.on('connect', () => { console.log('Redis Publisher 連線成功。'); });
-    subscriber.on('connect', () => { console.log('Redis Subscriber 連線成功。'); });
+    // 🚀 精簡事件處理器
+    publisher.on('error', (err) => console.error('Redis Publisher 錯誤:', err.message));
+    subscriber.on('error', (err) => console.error('Redis Subscriber 錯誤:', err.message));
+    
+    // 🚀 並行連線 Redis
+    await Promise.all([publisher.connect(), subscriber.connect()]);
+    console.log('✅ Redis 連線就緒');
 
     // 訂閱翻譯結果頻道 (來自 Python)
     subscriber.subscribe(TRANSLATION_CHANNEL, (err, count) => {
@@ -250,50 +244,8 @@ function startStreamProcessing(publisher) {
     });
 }
 
-// 3. 獲取直播 URL (yt-dlp 邏輯)
-function getStreamUrl(callback) {
-    console.log(`--- 正在使用 yt-dlp 解析直播串流 URL: ${LIVE_PAGE_URL} ---`);
-    const YTDLP_EXEC_PATH = 'yt-dlp'; 
-    const ytdlp = spawn(YTDLP_EXEC_PATH, ['-f', 'bestaudio', '--get-url', LIVE_PAGE_URL]);
-    
-    let streamUrl = '';
-    let ytdlpError = ''; // 🌟 新增：捕獲 yt-dlp 錯誤輸出
-    
-    ytdlp.stdout.on('data', (data) => {
-        streamUrl += data.toString().trim();
-    });
-    
-    ytdlp.stderr.on('data', (data) => {
-        // 🌟 捕獲所有 stderr 數據
-        ytdlpError += data.toString();
-        // console.error(`[yt-dlp 调试/警告]: ${data.toString().trim()}`); // 可以取消註釋這行查看進度
-    });
-
-    ytdlp.on('close', (code) => {
-        if (code === 0 && streamUrl) {
-            console.log('--- yt-dlp 解析成功。');
-            callback(streamUrl);
-        } else {
-            // 🌟 如果退出碼不是 0 或沒有返回 URL，輸出詳細錯誤
-            console.error(`致命錯誤：yt-dlp 进程退出, Code: ${code}.`);
-            if (ytdlpError.trim()) {
-                console.error(`yt-dlp 錯誤輸出 (stderr):\n${ytdlpError.trim()}`);
-            } else {
-                console.error('yt-dlp 沒有返回詳細錯誤訊息。可能原因：連結無效或非直播，或 Docker 網路問題。');
-            }
-            // 10 秒後重試
-            setTimeout(() => getStreamUrl(callback), 10000); 
-        }
-    });
-
-    ytdlp.on('error', (err) => {
-        console.error('致命錯誤：yt-dlp 啟動失敗:', err);
-        setTimeout(() => getStreamUrl(callback), 10000); 
-    });
-}
-
-function startMainFlow() {
-    initializeRedisClients();
-    // 直接啟動管道處理，不再需要獲取臨時 URL
+async function startMainFlow() {
+    await initializeRedisClients();
+    // 🚀 Redis 就緒後立即啟動串流處理
     startStreamProcessing(publisher); 
 }

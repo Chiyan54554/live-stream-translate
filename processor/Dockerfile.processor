@@ -1,49 +1,78 @@
 # Dockerfile for Python Processor (建議使用獨立的 Dockerfile.processor)
 
-# 使用 PyTorch 2.9.1 with CUDA 12.8 (支援 RTX 50 系列)
-FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+# 🚀 使用 NVIDIA CUDA 12.8 基礎映像 (RTX 50 系列支援)
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 # 設定環境變數
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/root/.cache/huggingface
-ENV MODEL_CACHE_DIR=/root/.cache/huggingface/hub
-# 🚀 啟用 pip 快取
-ENV PIP_CACHE_DIR=/root/.cache/pip
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/root/.cache/huggingface \
+    MODEL_CACHE_DIR=/root/.cache/huggingface/hub \
+    PIP_CACHE_DIR=/root/.cache/pip \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    # 🚀 CUDA 相關
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# 安裝必要套件
-RUN apt-get update && apt-get install -y \
+# 🚀 安裝 Python 3.11 和必要套件
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
     libsndfile1 \
     ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# 建立快取目錄
-RUN mkdir -p /root/.cache/huggingface/hub /root/.cache/pip
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && mkdir -p /root/.cache/huggingface/hub /root/.cache/pip
 
 # 設定工作目錄
 WORKDIR /app
 
-# 複製 requirements（分離以利快取）
+# ============================================================
+# 🚀 分層快取策略：將套件安裝分成多個獨立層
+# 只有當該層的依賴變更時才會重新建構
+# ============================================================
+
+# 📦 第一層：安裝 PyTorch + torchaudio (最大，約 2.5GB，很少變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        torch==2.7.0 \
+        torchaudio==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# 📦 第二層：安裝 ASR 核心套件 (中等大小，較少變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        faster-whisper>=1.0.0 \
+        "stable-ts>=2.16.0,<2.20.0" \
+        --extra-index-url https://download.pytorch.org/whl/cu128
+
+# 📦 第三層：安裝 Transformers 相關 (中等大小)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile \
+        transformers>=4.40.0 \
+        accelerate>=0.30.0 \
+        punctuators>=0.0.5
+
+# 複製 requirements（用於安裝剩餘套件）
 COPY processor/requirements.txt .
 
-# 🚀 使用 BuildKit 快取掛載，pip 套件只下載一次
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+# 📦 第四層：安裝剩餘小型套件 (快速，可能較常變更)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --no-compile -r requirements.txt \
+        --extra-index-url https://download.pytorch.org/whl/cu128
 
 # 🌟 建立符號連結，讓 CTranslate2 找到 cuDNN
 RUN CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib && \
-    echo "cuDNN lib path: $CUDNN_PATH" && \
-    ls -la $CUDNN_PATH && \
     mkdir -p /usr/local/lib/ctranslate2 && \
     ln -sf $CUDNN_PATH/libcudnn*.so* /usr/local/lib/ctranslate2/
 
-# 複製程式碼和資源檔案
-COPY processor/__init__.py .
-COPY processor/config.py .
-COPY processor/text_utils.py .
-COPY processor/translator.py .
-COPY processor/asr.py .
-COPY processor/main.py .
+# 🚀 合併 COPY 指令，減少層數
+COPY processor/__init__.py processor/config.py processor/text_utils.py \
+     processor/translator.py processor/asr.py processor/main.py ./
 COPY processor/mappings/ ./mappings/
 
 # 🌟 啟動時設定 LD_LIBRARY_PATH，讓 CTranslate2 優先使用我們安裝的 cuDNN
