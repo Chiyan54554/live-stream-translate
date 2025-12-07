@@ -10,10 +10,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone, timedelta
 from collections import deque
-
-import numpy as np
-import redis.asyncio as aioredis
-import aiohttp
+from typing import Any
 
 from config import (
     REDIS_HOST, REDIS_PORT, AUDIO_CHANNEL, TRANSLATION_CHANNEL,
@@ -23,12 +20,14 @@ from config import (
     USE_VAD, SUPPRESS_SILENCE,
     print_config
 )
-from asr import setup_environment, init_asr_model, whisper_asr
-from translator import llm_translate, warmup_llm
-from text_utils import (
-    filter_text, calculate_similarity,
-    extract_new_content, merge_incomplete_sentence
-)
+
+# 延遲載入重量級函數（首次使用時才載入）
+_whisper_asr = None
+_llm_translate = None
+_filter_text = None
+_calculate_similarity = None
+_extract_new_content = None
+_merge_incomplete_sentence = None
 
 
 # ============================================================
@@ -56,12 +55,34 @@ last_publish_time = 0
 recent_texts = deque(maxlen=15)
 context_history = deque(maxlen=8)
 pending_translation_task = None
-aio_session: aiohttp.ClientSession = None
+aio_session: Any = None
+
+
+def _lazy_imports():
+    """載入重型模組與函數（僅首次呼叫）"""
+    global _whisper_asr, _llm_translate, _filter_text, _calculate_similarity
+    global _extract_new_content, _merge_incomplete_sentence
+
+    if _whisper_asr is None:
+        from asr import whisper_asr  # 延遲避免啟動阻塞
+        from translator import llm_translate
+        from text_utils import (
+            filter_text, calculate_similarity,
+            extract_new_content, merge_incomplete_sentence
+        )
+        _whisper_asr = whisper_asr
+        _llm_translate = llm_translate
+        _filter_text = filter_text
+        _calculate_similarity = calculate_similarity
+        _extract_new_content = extract_new_content
+        _merge_incomplete_sentence = merge_incomplete_sentence
 
 
 def is_duplicate_or_overlap(text: str) -> bool:
     """檢查文字是否與最近發布的內容重複或高度重疊 - 優化版"""
     global recent_texts, last_transcription
+    if _calculate_similarity is None:
+        _lazy_imports()
     
     # 提前返回：空字串或完全相同
     if not text or text == last_transcription:
@@ -79,7 +100,7 @@ def is_duplicate_or_overlap(text: str) -> bool:
     
     # 使用 any() 提前終止
     return any(
-        calculate_similarity(text, recent) > SIMILARITY_THRESHOLD
+        _calculate_similarity(text, recent) > SIMILARITY_THRESHOLD
         for recent in recent_texts
     )
 
@@ -89,6 +110,7 @@ async def process_audio_chunk(audio_data_b64: str, r):
     global audio_buffer, overlap_buffer, last_transcription, last_publish_time
     global recent_texts, pending_text, last_full_sentence, pending_translation_task
     global aio_session
+    _lazy_imports()
     
     # 先檢查上一個翻譯任務是否完成
     if pending_translation_task is not None:
@@ -118,13 +140,14 @@ async def process_audio_chunk(audio_data_b64: str, r):
     overlap_buffer = audio_buffer[TARGET_BUFFER_SIZE - OVERLAP_BUFFER_SIZE:TARGET_BUFFER_SIZE]
     audio_buffer = audio_buffer[TARGET_BUFFER_SIZE:]
     
-    # 轉換為 numpy array
-    audio_array = np.frombuffer(audio_to_process, dtype=np.int16).astype(np.float32) / 32768.0
+    # 轉換為 numpy array（延遲匯入，避免啟動阻塞）
+    import numpy as np
+    audio_array = np.frombuffer(audio_to_process, dtype=np.int16).astype(np.float32, copy=False) / 32768.0
     
     # ASR 轉錄
     loop = asyncio.get_event_loop()
-    text = await loop.run_in_executor(None, whisper_asr, audio_array)
-    text = filter_text(text)
+    text = await loop.run_in_executor(None, _whisper_asr, audio_array)
+    text = _filter_text(text)
     
     if not text:
         return
@@ -134,12 +157,12 @@ async def process_audio_chunk(audio_data_b64: str, r):
         return
     
     # 提取新內容
-    text = extract_new_content(text, last_transcription)
+    text = _extract_new_content(text, last_transcription)
     if not text or len(text) < 2:
         return
     
     # 句子完整性處理
-    complete_sentence, pending_text = merge_incomplete_sentence(pending_text, text)
+    complete_sentence, pending_text = _merge_incomplete_sentence(pending_text, text)
     
     # 如果沒有完整句子，等待更多資料
     if not complete_sentence:
@@ -165,7 +188,7 @@ async def process_audio_chunk(audio_data_b64: str, r):
     # 並行翻譯
     async def translate_and_prepare_result(text_to_translate: str):
         """翻譯並準備結果 - 優化版"""
-        translation = await llm_translate(text_to_translate, aio_session)
+        translation = await _llm_translate(text_to_translate, aio_session)
         
         # 如果翻譯為空，返回 None 不發布
         if not translation or not translation.strip():
@@ -197,42 +220,71 @@ async def process_audio_chunk(audio_data_b64: str, r):
 async def main():
     """主循環"""
     global aio_session
-    
-    import concurrent.futures
-    
-    # 設定環境
-    setup_environment()
-    
+    from translator import warmup_llm
+
     # 印出配置
     print_config()
-    
-    # 建立異步 HTTP session（提前建立）
-    aio_session = aiohttp.ClientSession()
-    
-    # 建立執行緒池
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    
-    # 並行初始化：ASR 模型載入 + Redis 連線
-    loop = asyncio.get_event_loop()
-    
-    # 在背景執行 ASR 初始化
-    asr_future = loop.run_in_executor(executor, init_asr_model)
-    
-    # 同時連接 Redis
+
+    async def init_redis():
+        import redis.asyncio as aioredis
+        last_err = None
+        for attempt in range(3):
+            try:
+                r = aioredis.Redis(
+                    host=REDIS_HOST,
+                    port=REDIS_PORT,
+                    db=0,
+                    socket_connect_timeout=8,
+                    socket_timeout=8,
+                )
+                await r.ping()
+                print(f"✅ Redis 連線成功", file=sys.stderr, flush=True)
+                return r
+            except Exception as e:
+                last_err = e
+                await asyncio.sleep(1 + attempt)
+        raise last_err
+
+    async def init_asr():
+        from asr import setup_environment, init_asr_model
+        setup_environment()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_asr_model)
+
+    async def init_http_session():
+        import aiohttp
+        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+        return aiohttp.ClientSession(connector=connector)
+
     try:
-        r = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-        await r.ping()
-        print(f"✅ Redis 連線成功 (異步模式)", file=sys.stderr, flush=True)
+        results = await asyncio.gather(
+            init_redis(),
+            init_asr(),
+            init_http_session(),
+            return_exceptions=True,
+        )
+
+        if isinstance(results[0], Exception):
+            raise results[0]
+        if isinstance(results[1], Exception):
+            raise results[1]
+        if isinstance(results[2], Exception):
+            raise results[2]
+
+        r = results[0]
+        aio_session = results[2]
+
     except Exception as e:
-        print(f"❌ Redis 連線失敗: {e}", file=sys.stderr, flush=True)
-        await aio_session.close()
+        if aio_session:
+            try:
+                await aio_session.close()
+            except Exception:
+                pass
+        print(f"❌ 初始化失敗: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
-    
-    # 等待 ASR 初始化完成
-    await asr_future
-    executor.shutdown(wait=False)
-    
-    # 🚀 背景預熱 LLM（不阻塞主流程）
+
+    # 預先綁定重型函數並背景預熱 LLM
+    _lazy_imports()
     asyncio.create_task(warmup_llm())
 
     p = r.pubsub()
