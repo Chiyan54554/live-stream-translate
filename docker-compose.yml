@@ -76,6 +76,9 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
+      # 🎯 ASR/MT 切換：local 或 api（若留空，沿用舊的 USE_GOOGLE_STT / USE_CLOUD_TRANSLATION）
+      ASR_MODE: "local"   # api=Google STT, local=本地 Whisper
+      MT_MODE: "local"    # api=Cloud Translation, local=Ollama
       USE_GOOGLE_STT: "1"
       GOOGLE_APPLICATION_CREDENTIALS: /app/keys/gcp-sa.json
       # GOOGLE_STT_MODEL: default   # 留空或 default 由 Google 自行選型

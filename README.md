@@ -106,6 +106,18 @@ graph TD
 
 ## ⚙️ 配置說明
 
+### 快速切換本地/雲端 ASR / MT
+
+在 `docker-compose.yml` 的 `processor` 環境變數設定：
+
+```yaml
+ASR_MODE: "api"   # api=Google STT, local=本地 Whisper
+MT_MODE: "api"    # api=Cloud Translation, local=Ollama
+```
+
+- 若未設定 `ASR_MODE` / `MT_MODE`，會回退到舊的 `USE_GOOGLE_STT` / `USE_CLOUD_TRANSLATION` 變數。
+- 設為 `local` 時不需要雲端 API 金鑰；設為 `api` 時請確保已掛載 GCP 憑證。
+
 ### 修改直播源
 
 編輯 `server/server.js`：

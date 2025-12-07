@@ -41,8 +41,23 @@ MODEL_CACHE_DIR: str = os.getenv('MODEL_CACHE_DIR', '/root/.cache/huggingface/hu
 # 🎯 預先計算的布林值 (避免重複字串查找)
 USE_KOTOBA_PIPELINE: bool = 'kotoba-whisper-v2.1' in ASR_MODEL_NAME or 'kotoba-whisper-v2.2' in ASR_MODEL_NAME
 
+# === ASR/MT 模式選擇（local/api） ===
+_ASR_MODE_RAW = os.getenv('ASR_MODE', '').strip().lower()
+_MT_MODE_RAW = os.getenv('MT_MODE', '').strip().lower()
+
 # === Google Speech-to-Text ===
-USE_GOOGLE_STT: bool = os.getenv('USE_GOOGLE_STT', '0') == '1'
+# 兼容舊變數：若 ASR_MODE 未指定，沿用 USE_GOOGLE_STT
+_USE_GOOGLE_STT_ENV = os.getenv('USE_GOOGLE_STT', '0') == '1'
+if _ASR_MODE_RAW in ('api', 'cloud', 'google'):
+    USE_GOOGLE_STT: bool = True
+    ASR_MODE: str = 'api'
+elif _ASR_MODE_RAW in ('local', 'whisper', 'model'):
+    USE_GOOGLE_STT = False
+    ASR_MODE = 'local'
+else:
+    USE_GOOGLE_STT = _USE_GOOGLE_STT_ENV
+    ASR_MODE = 'api' if USE_GOOGLE_STT else 'local'
+
 # 留空則由 Google 預設模型決定，避免語言不支援的錯誤
 GOOGLE_STT_MODEL: str = os.getenv('GOOGLE_STT_MODEL', '')
 GOOGLE_STT_MAX_ALTERNATIVES: int = int(os.getenv('GOOGLE_STT_MAX_ALTERNATIVES', 1))
@@ -59,7 +74,18 @@ LLM_API_URL: str = f"http://{LLM_HOST}:{LLM_PORT}/api/generate"
 LLM_TIMEOUT: int = 3  # 翻譯超時秒數（避免過早截斷）
 
 # === Google Cloud Translation ===
-USE_CLOUD_TRANSLATION: bool = os.getenv('USE_CLOUD_TRANSLATION', '0') == '1'
+# 兼容舊變數：若 MT_MODE 未指定，沿用 USE_CLOUD_TRANSLATION
+_USE_CLOUD_TRANSLATION_ENV = os.getenv('USE_CLOUD_TRANSLATION', '0') == '1'
+if _MT_MODE_RAW in ('api', 'cloud', 'gcp'):
+    USE_CLOUD_TRANSLATION: bool = True
+    MT_MODE: str = 'api'
+elif _MT_MODE_RAW in ('local', 'llm', 'ollama'):
+    USE_CLOUD_TRANSLATION = False
+    MT_MODE = 'local'
+else:
+    USE_CLOUD_TRANSLATION = _USE_CLOUD_TRANSLATION_ENV
+    MT_MODE = 'api' if USE_CLOUD_TRANSLATION else 'local'
+
 CLOUD_TRANSLATE_PROJECT_ID: str = os.getenv('CLOUD_TRANSLATE_PROJECT_ID', '')
 CLOUD_TRANSLATE_LOCATION: str = os.getenv('CLOUD_TRANSLATE_LOCATION', 'global')
 CLOUD_TRANSLATE_TIMEOUT: int = int(os.getenv('CLOUD_TRANSLATE_TIMEOUT', 3))
@@ -81,16 +107,15 @@ SIMILARITY_THRESHOLD: float = 0.75
 # 🎯 預先建立的配置字串 (用於 print_config)
 _CONFIG_SEPARATOR: str = "=" * 50
 _TRANSLATION_DESC = (
-    f"Google Cloud Translation (project={CLOUD_TRANSLATE_PROJECT_ID or 'unset'}, location={CLOUD_TRANSLATE_LOCATION})"
+    f"Cloud Translation (project={CLOUD_TRANSLATE_PROJECT_ID or 'unset'}, location={CLOUD_TRANSLATE_LOCATION})"
     if USE_CLOUD_TRANSLATION else
-    f"{LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}"
+    f"LLM: {LLM_MODEL} @ {LLM_HOST}:{LLM_PORT}"
 )
 
 _CONFIG_LINES: tuple = (
-    f"🎯 ASR 模型: {ASR_MODEL_NAME}",
+    f"🎯 ASR 模式: {ASR_MODE} | 模型: {ASR_MODEL_NAME}",
     f"🎯 使用 Kotoba Pipeline: {USE_KOTOBA_PIPELINE}",
-    f"🎯 使用 Google STT: {USE_GOOGLE_STT}",
-    f"🎯 翻譯引擎: {_TRANSLATION_DESC}",
+    f"🎯 MT 模式: {MT_MODE} | {_TRANSLATION_DESC}",
     f"🎯 stable-ts: {USE_STABLE_TS}, VAD: {USE_VAD}",
 )
 
