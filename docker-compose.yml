@@ -6,7 +6,7 @@ services:
     expose:
       - "6379"
 
-    command: redis-server --client-output-buffer-limit pubsub 128mb 64mb 60
+    command: ["/bin/sh", "-c", "redis-server --loglevel warning --client-output-buffer-limit pubsub 128mb 64mb 60 > /var/log/redis.log 2>&1"]
 
     # 健康檢查確保其他服務等待 Redis 啟動
     healthcheck:

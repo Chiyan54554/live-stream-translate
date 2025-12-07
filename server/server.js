@@ -6,9 +6,13 @@ const path = require('path');
 // 引入 Redis
 const Redis = require('ioredis'); 
 
+// 日誌開關：預設只顯示錯誤；設 LOG_VERBOSE=1 以查看資訊級別
+const LOG_VERBOSE = process.env.LOG_VERBOSE === '1';
+const log = (...args) => LOG_VERBOSE && console.log(...args);
+
 // --- 配置參數 (預先計算的常數) ---
 const WSS_PORT = 8080; 
-const LIVE_PAGE_URL = 'https://www.twitch.tv/nekoko88'; // 直播頁面 URL
+const LIVE_PAGE_URL = 'https://www.twitch.tv/amagami_channel'; // 直播頁面 URL
 
 // Redis 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost'; 
@@ -108,12 +112,12 @@ const server = http.createServer((req, res) => {
 wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
-    console.log('Client connected.');
-    ws.on('close', () => console.log('Client disconnected.'));
+    log('Client connected.');
+    ws.on('close', () => log('Client disconnected.'));
 });
 
 server.listen(WSS_PORT, () => {
-    console.log(`Node.js WebSocket Server 启动在 ws://localhost:${WSS_PORT}`);
+    log(`Node.js WebSocket Server 启动在 ws://localhost:${WSS_PORT}`);
     startMainFlow();
 });
 
@@ -130,7 +134,7 @@ async function initializeRedisClients() {
     
     // 🚀 並行連線 Redis
     await Promise.all([publisher.connect(), subscriber.connect()]);
-    console.log('✅ Redis 連線就緒');
+    log('✅ Redis 連線就緒');
 
     // 訂閱翻譯結果頻道 (來自 Python)
     subscriber.subscribe(TRANSLATION_CHANNEL, (err, count) => {
@@ -138,7 +142,7 @@ async function initializeRedisClients() {
             console.error('致命錯誤：Redis 訂閱翻譯頻道失敗:', err);
             return;
         }
-        console.log(`Node.js 成功訂閱 Redis 頻道: ${TRANSLATION_CHANNEL} (${count} 個頻道)。`);
+        log(`Node.js 成功訂閱 Redis 頻道: ${TRANSLATION_CHANNEL} (${count} 個頻道)。`);
     });
 
     // 🎯 處理接收到的 Redis 消息 - 優化版本
@@ -168,7 +172,7 @@ async function initializeRedisClients() {
 
 // 2. 啟動串流處理 (yt-dlp -> Pipe -> FFmpeg -> Redis)
 function startStreamProcessing(publisher) {
-    console.log(`--- 正在使用 yt-dlp 啟動串流處理: ${LIVE_PAGE_URL} ---`);
+    log(`--- 正在使用 yt-dlp 啟動串流處理: ${LIVE_PAGE_URL} ---`);
     const YTDLP_EXEC_PATH = 'yt-dlp';
     const FFMPEG_EXEC_PATH = 'ffmpeg';
     
@@ -196,8 +200,8 @@ function startStreamProcessing(publisher) {
     // 3. 核心：將 yt-dlp 的 stdout 管道連接到 FFmpeg 的 stdin
     ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
 
-    console.log('✅ yt-dlp 輸出已成功導向 FFmpeg 進行處理 (Piping)。');
-    console.log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
+    log('✅ yt-dlp 輸出已成功導向 FFmpeg 進行處理 (Piping)。');
+    log(`--- FFmpeg 輸出管道 -> Node.js -> Redis 頻道: ${AUDIO_CHANNEL} ---`);
     
     // 4. 處理 FFmpeg 的輸出 (音頻數據) - 🎯 優化版本
     let audioBuffer = Buffer.alloc(0);
@@ -239,7 +243,7 @@ function startStreamProcessing(publisher) {
     ffmpegProcess.on('error', (err) => console.error('致命錯誤：FFmpeg 啟動失敗:', err));
     ffmpegProcess.on('close', (code) => {
         if (code !== 0) {
-            console.log(`FFmpeg 进程退出, Code: ${code}.`);
+            console.error(`FFmpeg 进程退出, Code: ${code}.`);
         }
     });
 }

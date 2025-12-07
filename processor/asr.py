@@ -9,6 +9,12 @@ import traceback
 import numpy as np
 from collections import Counter
 
+# 控制資訊級日誌：LOG_VERBOSE=1 時輸出；預設靜音
+LOG_VERBOSE = os.getenv("LOG_VERBOSE", "0") == "1"
+def info(msg):
+    if LOG_VERBOSE:
+        print(msg, file=sys.stderr, flush=True)
+
 from config import (
     ASR_MODEL_NAME, MODEL_CACHE_DIR, USE_KOTOBA_PIPELINE,
     SAMPLE_RATE, SOURCE_LANG_CODE, MIN_AUDIO_ENERGY,
@@ -96,28 +102,28 @@ def setup_environment():
         current_ld = os.environ.get("LD_LIBRARY_PATH", "")
         if cudnn_lib not in current_ld:
             os.environ["LD_LIBRARY_PATH"] = f"{cudnn_lib}:{current_ld}"
-        print(f"✅ cuDNN 路徑已設定: {cudnn_lib}", file=sys.stderr, flush=True)
+        info(f"✅ cuDNN 路徑已設定: {cudnn_lib}")
     except ImportError:
-        print("⚠️ nvidia-cudnn 未安裝", file=sys.stderr, flush=True)
+        info("⚠️ nvidia-cudnn 未安裝")
     
     import torch
-    print(f"PyTorch: {torch.__version__}", file=sys.stderr, flush=True)
-    print(f"CUDA 可用: {torch.cuda.is_available()}", file=sys.stderr, flush=True)
+    info(f"PyTorch: {torch.__version__}")
+    info(f"CUDA 可用: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
-        print(f"CUDA 版本: {torch.version.cuda}", file=sys.stderr, flush=True)
-        print(f"GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr, flush=True)
+        info(f"CUDA 版本: {torch.version.cuda}")
+        info(f"GPU: {torch.cuda.get_device_name(0)}")
         DEVICE = "cuda"
         COMPUTE_TYPE = "float16"
     
     import stable_whisper
-    print(f"✅ stable-ts 版本: {stable_whisper.__version__}", file=sys.stderr, flush=True)
+    info(f"✅ stable-ts 版本: {stable_whisper.__version__}")
     
     try:
         from transformers import pipeline as hf_pipeline
         TRANSFORMERS_AVAILABLE = True
-        print("✅ Transformers pipeline 可用", file=sys.stderr, flush=True)
+        info("✅ Transformers pipeline 可用")
     except ImportError:
-        print("⚠️ Transformers 未安裝，將使用 faster-whisper", file=sys.stderr, flush=True)
+        info("⚠️ Transformers 未安裝，將使用 faster-whisper")
 
 
 def init_asr_model():
@@ -132,14 +138,14 @@ def init_asr_model():
     # 根據模型類型選擇載入方式
     if USE_KOTOBA_PIPELINE:
         if not TRANSFORMERS_AVAILABLE:
-            print(f"⚠️ 使用 Kotoba 需要 Transformers，但未安裝", file=sys.stderr, flush=True)
-            print(f"🔄 自動切換到 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
+            info(f"⚠️ 使用 Kotoba 需要 Transformers，但未安裝")
+            info(f"🔄 自動切換到 large-v3 (faster-whisper)...")
         else:
             try:
                 from transformers import pipeline as hf_pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
                 
                 model_version = "v2.2" if "v2.2" in ASR_MODEL_NAME else "v2.1"
-                print(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper {model_version}...", file=sys.stderr, flush=True)
+                info(f"🔄 使用 Transformers Pipeline 載入 Kotoba-Whisper {model_version}...")
                 
                 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
                 device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -166,13 +172,13 @@ def init_asr_model():
                 COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "float32"
                 USING_KOTOBA_PIPELINE = True
                 
-                print(f"✅ Kotoba-Whisper {model_version} 已就緒 (Transformers)", file=sys.stderr, flush=True)
-                print(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
+                info(f"✅ Kotoba-Whisper {model_version} 已就緒 (Transformers)")
+                info(f"✅ 🚀 GPU 模式: {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s")
                 return
                 
             except Exception as e:
-                print(f"⚠️ Kotoba Pipeline 載入失敗: {e}", file=sys.stderr, flush=True)
-                print(f"🔄 退回使用 large-v3 (faster-whisper)...", file=sys.stderr, flush=True)
+                info(f"⚠️ Kotoba Pipeline 載入失敗: {e}")
+                info(f"🔄 退回使用 large-v3 (faster-whisper)...")
                 traceback.print_exc()
     
     # 標準 faster-whisper + stable-ts
@@ -181,7 +187,7 @@ def init_asr_model():
     
     def try_load_model(device, compute_type):
         try:
-            print(f"🔄 使用 stable-ts 載入 {fallback_model}: {device}/{compute_type}...", file=sys.stderr, flush=True)
+            info(f"🔄 使用 stable-ts 載入 {fallback_model}: {device}/{compute_type}...")
             
             model = stable_whisper.load_faster_whisper(
                 fallback_model,
@@ -195,7 +201,7 @@ def init_asr_model():
             # 移除預熱步驟以加速載入（首次推理會稍慢但可接受）
             return model
         except Exception as e:
-            print(f"⚠️ {device}/{compute_type} 失敗: {e}", file=sys.stderr, flush=True)
+            info(f"⚠️ {device}/{compute_type} 失敗: {e}")
             traceback.print_exc()
             return None
 
@@ -212,8 +218,8 @@ def init_asr_model():
         sys.exit(1)
     
     status = "🚀 GPU" if DEVICE == "cuda" else "⚠️ CPU"
-    print(f"✅ {status} 模式 ({fallback_model}): {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s", file=sys.stderr, flush=True)
-    print(f"✅ stable-ts 模型已就緒", file=sys.stderr, flush=True)
+    info(f"✅ {status} 模式 ({fallback_model}): {DEVICE}/{COMPUTE_TYPE}, {time.time()-start:.1f}s")
+    info(f"✅ stable-ts 模型已就緒")
 
 
 def check_voice_activity(audio_array: np.ndarray) -> bool:

@@ -5,10 +5,11 @@
 # 要使用的模型（可透過環境變數覆蓋）
 MODEL_NAME="${OLLAMA_MODEL:-qwen3:8b}"
 
-echo "🚀 啟動 Ollama 服務..."
+echo "🚀 啟動 Ollama 服務 (安靜模式，詳細日誌寫入 /var/log/ollama.log)..."
 
-# 背景啟動 Ollama 服務
-ollama serve &
+# 背景啟動 Ollama 服務（stdout/stderr 轉存到檔案，減少終端噪音）
+mkdir -p /var/log
+ollama serve > /var/log/ollama.log 2>&1 &
 OLLAMA_PID=$!
 
 # 簡短等待服務就緒 (3秒)
