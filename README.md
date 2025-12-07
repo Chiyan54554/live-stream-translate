@@ -142,6 +142,7 @@ environment:
           volumes:
              - ./gcp-sa.json:/app/keys/gcp-sa.json:ro
     ```
+    > 你也可以使用自己的檔名（例如 `nodal-alloy-....json`），記得同步更新 volume 路徑與 `GOOGLE_APPLICATION_CREDENTIALS`。
 
 2. 啟用 Google STT 並指定憑證路徑（支援 `latest_short` / `latest_long` 模型）：
     ```yaml
