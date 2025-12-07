@@ -76,6 +76,9 @@ services:
     environment:
       REDIS_HOST: redis 
       REDIS_PORT: 6379
+      # 🎯 ASR/MT 切換：local 或 api（若留空，沿用舊的 USE_GOOGLE_STT / USE_CLOUD_TRANSLATION）
+      ASR_MODE: "local"   # api=Google STT, local=本地 Whisper
+      MT_MODE: "local"    # api=Cloud Translation, local=Ollama
       USE_GOOGLE_STT: "1"
       GOOGLE_APPLICATION_CREDENTIALS: /app/keys/gcp-sa.json
       # GOOGLE_STT_MODEL: default   # 留空或 default 由 Google 自行選型
@@ -97,10 +100,14 @@ services:
       LLM_HOST: ollama
       LLM_PORT: "11434"
       LLM_MODEL: "qwen3:8b"
+      USE_CLOUD_TRANSLATION: "1"
+      CLOUD_TRANSLATE_PROJECT_ID: "nodal-alloy-480514-e2"  # 請改成實際 GCP 專案 ID（需以字母開頭）
+      # 可選：CLOUD_TRANSLATE_LOCATION: "global"
+      # 可選：CLOUD_TRANSLATE_TIMEOUT: 8
     
     volumes:
       - huggingface_cache:/root/.cache/huggingface
-      - ./nodal-alloy-480514-e2-7bbdf332cfed.json:/app/keys/gcp-sa.json:ro
+      - ./nodal-alloy-480514-e2-dd3350c6b301.json:/app/keys/gcp-sa.json:ro
     
     # 🚀 只等待 Redis，Ollama 會在背景載入
     depends_on:

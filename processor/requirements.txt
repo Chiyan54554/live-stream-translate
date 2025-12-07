@@ -4,6 +4,7 @@
 
 # 翻譯與工具
 opencc-python-reimplemented>=0.1.7
+google-cloud-translate>=3.0.2
 
 # 雲端 ASR
 google-cloud-speech>=2.26.0

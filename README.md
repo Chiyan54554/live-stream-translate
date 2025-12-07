@@ -106,6 +106,18 @@ graph TD
 
 ## ⚙️ 配置說明
 
+### 快速切換本地/雲端 ASR / MT
+
+在 `docker-compose.yml` 的 `processor` 環境變數設定：
+
+```yaml
+ASR_MODE: "api"   # api=Google STT, local=本地 Whisper
+MT_MODE: "api"    # api=Cloud Translation, local=Ollama
+```
+
+- 若未設定 `ASR_MODE` / `MT_MODE`，會回退到舊的 `USE_GOOGLE_STT` / `USE_CLOUD_TRANSLATION` 變數。
+- 設為 `local` 時不需要雲端 API 金鑰；設為 `api` 時請確保已掛載 GCP 憑證。
+
 ### 修改直播源
 
 編輯 `server/server.js`：
@@ -165,6 +177,21 @@ environment:
   # LLM_MODEL: "qwen2.5:7b"       # 備選
   # LLM_MODEL: "llama3.1:8b"      # 英文更強
 ```
+
+#### 改用 Google Cloud Translation（雲端翻譯）
+
+1. 確認 `processor` 服務已掛載 GCP 憑證並設定 `GOOGLE_APPLICATION_CREDENTIALS`。
+2. 在 `docker-compose.yml` 啟用 Cloud Translation：
+    ```yaml
+    services:
+       processor:
+          environment:
+             USE_CLOUD_TRANSLATION: "1"
+             CLOUD_TRANSLATE_PROJECT_ID: "your-gcp-project-id"
+             # 可選：CLOUD_TRANSLATE_LOCATION: global
+             # 可選：CLOUD_TRANSLATE_TIMEOUT: 8
+    ```
+3. 啟用後會改用 Cloud Translation，Ollama 不再參與翻譯（仍可保留作備援，將 USE_CLOUD_TRANSLATION 設回 0 即可）。
 
 ### 調整緩衝參數
 
